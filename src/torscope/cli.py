@@ -481,6 +481,140 @@ def cmd_circuit(args: argparse.Namespace) -> int:  # pylint: disable=too-many-re
         return 1
 
 
+def cmd_stream(args: argparse.Namespace) -> int:  # pylint: disable=too-many-return-statements
+    """Test opening a stream through a circuit."""
+    try:
+        consensus = get_consensus(args.no_cache)
+
+        # Find relay by fingerprint or nickname
+        query = args.relay.upper()
+        relay = None
+
+        for r in consensus.routers:
+            if r.fingerprint.startswith(query):
+                relay = r
+                break
+            if r.nickname.upper() == query:
+                relay = r
+                break
+
+        if relay is None:
+            print(f"Relay not found: {args.relay}", file=sys.stderr)
+            return 1
+
+        # Check if relay has Exit flag
+        if "Exit" not in relay.flags:
+            print(f"Warning: {relay.nickname} does not have Exit flag", file=sys.stderr)
+
+        # Fetch server descriptor to get ntor-onion-key
+        client = DirectoryClient()
+        print(f"Fetching descriptor for {relay.nickname}...", file=sys.stderr)
+        content, _ = client.fetch_server_descriptors([relay.fingerprint])
+        descriptors = ServerDescriptorParser.parse(content)
+
+        if not descriptors:
+            print(f"No descriptor found for {relay.nickname}", file=sys.stderr)
+            return 1
+
+        desc = descriptors[0]
+        if not desc.ntor_onion_key:
+            print(f"Relay {relay.nickname} has no ntor-onion-key", file=sys.stderr)
+            return 1
+
+        # Decode the ntor-onion-key (base64, may need padding)
+        key_b64 = desc.ntor_onion_key
+        padding = 4 - len(key_b64) % 4
+        if padding != 4:
+            key_b64 += "=" * padding
+        ntor_key = base64.b64decode(key_b64)
+
+        # Parse target
+        target_host = args.target
+        target_port = args.port
+
+        print(f"\nCreating circuit to {relay.nickname} ({relay.ip}:{relay.orport})...")
+
+        conn = RelayConnection(host=relay.ip, port=relay.orport, timeout=args.timeout)
+
+        try:
+            conn.connect()
+            print("  TLS connection established")
+
+            if not conn.handshake():
+                print("  Link handshake failed", file=sys.stderr)
+                return 1
+            print(f"  Link protocol: v{conn.link_protocol}")
+
+            # Create circuit
+            circuit = Circuit.create(conn)
+            print(f"  Circuit ID: {circuit.circ_id:#010x}")
+
+            # Extend to relay
+            if not circuit.extend_to(relay.fingerprint, ntor_key):
+                print("  Circuit creation failed", file=sys.stderr)
+                return 1
+
+            print("  ntor handshake successful!")
+
+            # Open stream
+            print(f"\nOpening stream to {target_host}:{target_port}...")
+            stream_id = circuit.begin_stream(target_host, target_port)
+
+            if stream_id is None:
+                print("  Stream rejected by relay", file=sys.stderr)
+                circuit.destroy()
+                return 1
+
+            print(f"  Stream opened! (stream_id={stream_id})")
+            print("  RELAY_CONNECTED received")
+
+            # Send HTTP request if target is port 80 or 443
+            if target_port == 80:
+                request = f"GET / HTTP/1.0\r\nHost: {target_host}\r\n\r\n"
+                print("\nSending HTTP request...")
+                circuit.send_data(stream_id, request.encode("ascii"))
+
+                # Receive response (first chunk)
+                print("Waiting for response...")
+                response_data = b""
+                for _ in range(5):  # Read up to 5 data cells
+                    data = circuit.recv_data(stream_id)
+                    if data is None:
+                        break
+                    response_data += data
+
+                if response_data:
+                    # Show first 500 bytes of response
+                    response_text = response_data[:500].decode("utf-8", errors="replace")
+                    print(f"\nResponse ({len(response_data)} bytes):")
+                    print("-" * 40)
+                    print(response_text)
+                    if len(response_data) > 500:
+                        print("...")
+                    print("-" * 40)
+                else:
+                    print("No data received")
+
+            print("\nStream test successful!")
+
+            # Clean up
+            circuit.destroy()
+            print("Circuit destroyed")
+            return 0
+
+        except ConnectionError as e:
+            print(f"  Connection error: {e}", file=sys.stderr)
+            return 1
+        finally:
+            conn.close()
+
+    # pylint: disable-next=broad-exception-caught
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        traceback.print_exc()
+        return 1
+
+
 class _SubcommandHelpFormatter(argparse.RawDescriptionHelpFormatter):
     """Custom formatter to clean up subcommand help display."""
 
@@ -573,6 +707,20 @@ def main() -> int:
         "--timeout", type=float, default=30.0, help="Connection timeout (default: 30s)"
     )
 
+    # stream command
+    stream_parser = subparsers.add_parser(
+        "stream", help="Test opening a stream through a relay (RELAY_BEGIN)"
+    )
+    stream_parser.add_argument(
+        "relay", metavar="nickname|fingerprint", help="Relay nickname or fingerprint (must be Exit)"
+    )
+    stream_parser.add_argument("target", help="Target hostname or IP")
+    stream_parser.add_argument("port", type=int, help="Target port")
+    stream_parser.add_argument("--no-cache", action="store_true", help="Bypass cache, fetch fresh")
+    stream_parser.add_argument(
+        "--timeout", type=float, default=30.0, help="Connection timeout (default: 30s)"
+    )
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -589,6 +737,7 @@ def main() -> int:
         "extra-info": cmd_extra_info,
         "connect": cmd_connect,
         "circuit": cmd_circuit,
+        "stream": cmd_stream,
     }
 
     try:

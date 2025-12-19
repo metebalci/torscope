@@ -13,12 +13,23 @@ from types import TracebackType
 
 from torscope.onion.cell import (
     HTYPE_NTOR,
+    Cell,
     CellCommand,
     Create2Cell,
     DestroyCell,
 )
 from torscope.onion.connection import RelayConnection
 from torscope.onion.ntor import CircuitKeys, NtorClientState, node_id_from_fingerprint
+from torscope.onion.relay import (
+    RELAY_BODY_LEN,
+    RELAY_DATA_LEN,
+    RelayCell,
+    RelayCommand,
+    RelayCrypto,
+    RelayEndReason,
+    create_begin_payload,
+    create_end_payload,
+)
 
 
 class CircuitState(Enum):
@@ -52,6 +63,8 @@ class Circuit:
     circ_id: int = 0
     state: CircuitState = CircuitState.NEW
     hops: list[CircuitHop] = field(default_factory=list)
+    _crypto: RelayCrypto | None = field(default=None, repr=False)
+    _next_stream_id: int = field(default=1, repr=False)
 
     @classmethod
     def create(cls, connection: RelayConnection) -> "Circuit":
@@ -130,12 +143,22 @@ class Circuit:
                 return False
 
             # Store hop with keys
+            keys = CircuitKeys.from_key_material(key_material)
             hop = CircuitHop(
                 fingerprint=fingerprint,
                 ntor_onion_key=ntor_onion_key,
-                keys=CircuitKeys.from_key_material(key_material),
+                keys=keys,
             )
             self.hops.append(hop)
+
+            # Initialize crypto for relay cells
+            self._crypto = RelayCrypto.create(
+                key_forward=keys.key_forward,
+                key_backward=keys.key_backward,
+                digest_forward=keys.digest_forward,
+                digest_backward=keys.digest_backward,
+            )
+
             self.state = CircuitState.OPEN
             return True
 
@@ -168,6 +191,161 @@ class Circuit:
     def is_open(self) -> bool:
         """Check if circuit is ready for use."""
         return self.state == CircuitState.OPEN
+
+    def _allocate_stream_id(self) -> int:
+        """Allocate a new stream ID."""
+        stream_id = self._next_stream_id
+        self._next_stream_id += 1
+        if self._next_stream_id > 0xFFFF:
+            self._next_stream_id = 1  # Wrap around (0 is reserved for control)
+        return stream_id
+
+    def send_relay(self, relay_cell: RelayCell) -> None:
+        """
+        Send an encrypted relay cell on this circuit.
+
+        Args:
+            relay_cell: RelayCell to send
+        """
+        if not self.is_open:
+            raise RuntimeError("Circuit is not open")
+        if self._crypto is None:
+            raise RuntimeError("Circuit crypto not initialized")
+
+        # Encrypt the relay cell
+        encrypted_payload = self._crypto.encrypt_forward(relay_cell)
+
+        # Wrap in a RELAY cell
+        cell = Cell(
+            circ_id=self.circ_id,
+            command=CellCommand.RELAY,
+            payload=encrypted_payload,
+        )
+        self.connection.send_cell(cell)
+
+    def recv_relay(self) -> RelayCell | None:
+        """
+        Receive and decrypt a relay cell from this circuit.
+
+        Returns:
+            Decrypted RelayCell, or None if decryption failed
+        """
+        if not self.is_open:
+            raise RuntimeError("Circuit is not open")
+        if self._crypto is None:
+            raise RuntimeError("Circuit crypto not initialized")
+
+        # Receive cell
+        cell = self.connection.recv_cell()
+
+        if cell.command == CellCommand.DESTROY:
+            self.state = CircuitState.CLOSED
+            return None
+
+        if cell.command not in (CellCommand.RELAY, CellCommand.RELAY_EARLY):
+            # Unexpected cell type
+            return None
+
+        # Decrypt relay cell
+        return self._crypto.decrypt_backward(cell.payload[:RELAY_BODY_LEN])
+
+    def begin_stream(self, address: str, port: int) -> int | None:
+        """
+        Open a stream to a remote address.
+
+        Args:
+            address: Hostname or IP address
+            port: Port number
+
+        Returns:
+            Stream ID if successful, None if failed
+        """
+        stream_id = self._allocate_stream_id()
+
+        # Send RELAY_BEGIN
+        begin_cell = RelayCell(
+            relay_command=RelayCommand.BEGIN,
+            stream_id=stream_id,
+            data=create_begin_payload(address, port),
+        )
+        self.send_relay(begin_cell)
+
+        # Wait for RELAY_CONNECTED or RELAY_END
+        response = self.recv_relay()
+        if response is None:
+            return None
+
+        if response.relay_command == RelayCommand.CONNECTED:
+            return stream_id
+
+        if response.relay_command == RelayCommand.END:
+            # Stream was rejected
+            return None
+
+        # Unexpected response
+        return None
+
+    def end_stream(self, stream_id: int, reason: RelayEndReason = RelayEndReason.DONE) -> None:
+        """
+        Close a stream.
+
+        Args:
+            stream_id: Stream ID to close
+            reason: Reason for closing
+        """
+        end_cell = RelayCell(
+            relay_command=RelayCommand.END,
+            stream_id=stream_id,
+            data=create_end_payload(reason),
+        )
+        self.send_relay(end_cell)
+
+    def send_data(self, stream_id: int, data: bytes) -> None:
+        """
+        Send data on a stream.
+
+        Args:
+            stream_id: Stream ID
+            data: Data to send (will be chunked if necessary)
+        """
+        # Send in chunks
+        offset = 0
+        while offset < len(data):
+            chunk = data[offset : offset + RELAY_DATA_LEN]
+            data_cell = RelayCell(
+                relay_command=RelayCommand.DATA,
+                stream_id=stream_id,
+                data=chunk,
+            )
+            self.send_relay(data_cell)
+            offset += RELAY_DATA_LEN
+
+    def recv_data(self, stream_id: int) -> bytes | None:
+        """
+        Receive data from a stream.
+
+        Args:
+            stream_id: Stream ID
+
+        Returns:
+            Data bytes, or None if stream ended or error
+        """
+        response = self.recv_relay()
+        if response is None:
+            return None
+
+        if response.stream_id != stream_id:
+            # Data for different stream (shouldn't happen in single-stream use)
+            return None
+
+        if response.relay_command == RelayCommand.DATA:
+            return response.data
+
+        if response.relay_command == RelayCommand.END:
+            return None
+
+        # Unexpected command
+        return None
 
     def __enter__(self) -> "Circuit":
         """Context manager entry."""
