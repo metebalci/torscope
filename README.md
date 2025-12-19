@@ -27,12 +27,6 @@ A tool for exploring and getting information about the Tor network.
 pip install torscope
 ```
 
-For development:
-
-```bash
-pip install -e ".[dev]"
-```
-
 ## Quick Start
 
 ```bash
@@ -94,66 +88,6 @@ Creating circuit to moria1 (128.31.0.39:9201)...
 
   Circuit created successfully!
   Circuit destroyed
-```
-
-## Development
-
-### Setup
-
-1. Clone the repository
-2. Install development dependencies:
-   ```bash
-   pip install -e ".[dev]"
-   ```
-
-### Running Tests
-
-```bash
-pytest
-```
-
-With coverage:
-
-```bash
-pytest --cov=torscope --cov-report=html
-```
-
-### Code Formatting and Linting
-
-Format code with Black:
-```bash
-black src tests
-```
-
-Lint with Ruff:
-```bash
-ruff check src tests
-```
-
-Type check with mypy:
-```bash
-mypy src
-```
-
-## Architecture
-
-```
-src/torscope/
-├── cli.py                 # Command-line interface
-├── cache.py               # Consensus caching
-├── directory/             # Directory protocol
-│   ├── authority.py       # Directory authorities
-│   ├── fallback.py        # Fallback directories
-│   ├── client.py          # HTTP client for fetching
-│   ├── consensus.py       # Consensus parser
-│   ├── descriptor.py      # Server descriptor parser
-│   ├── extra_info.py      # Extra-info parser
-│   └── models.py          # Data models
-└── onion/                 # OR protocol
-    ├── cell.py            # Cell format (VERSIONS, NETINFO, CREATE2, etc.)
-    ├── connection.py      # TLS connection and link handshake
-    ├── circuit.py         # Circuit management
-    └── ntor.py            # ntor handshake (Curve25519)
 ```
 
 ## License
