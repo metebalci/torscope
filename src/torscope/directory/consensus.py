@@ -4,8 +4,7 @@ Consensus document parsing.
 This module provides functionality to parse Tor network consensus documents.
 """
 
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 from torscope.directory.models import (
     AuthorityEntry,
@@ -40,16 +39,16 @@ class ConsensusParser:
             version=3,
             vote_status="consensus",
             consensus_method=1,
-            valid_after=datetime.now(timezone.utc),
-            fresh_until=datetime.now(timezone.utc),
-            valid_until=datetime.now(timezone.utc),
+            valid_after=datetime.now(UTC),
+            fresh_until=datetime.now(UTC),
+            valid_until=datetime.now(UTC),
             voting_delay=(0, 0),
             raw_document=text,
             fetched_from=fetched_from,
-            fetched_at=datetime.now(timezone.utc),
+            fetched_at=datetime.now(UTC),
         )
 
-        current_router: Optional[RouterStatusEntry] = None
+        current_router: RouterStatusEntry | None = None
         i = 0
 
         while i < len(lines):
@@ -246,7 +245,7 @@ class ConsensusParser:
         try:
             return datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
         except ValueError:
-            return datetime.now(timezone.utc)
+            return datetime.now(UTC)
 
     @staticmethod
     def _parse_protocols(proto_str: str) -> dict[str, list[int]]:

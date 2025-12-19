@@ -1,11 +1,14 @@
 .DEFAULT_GOAL = build
 
-.PHONY: test dist-clean build upload update-authorities
+.PHONY: test lint dist-clean build upload update-authorities
 
-test:
+lint:
 	black --check src
+	ruff check src
 	mypy src
 	pylint src
+
+test: lint
 	pytest
 
 dist-clean:

@@ -10,6 +10,7 @@ import ssl
 import struct
 from dataclasses import dataclass, field
 from types import TracebackType
+from typing import Any
 
 from torscope.onion.cell import (
     CELL_LEN_V3,
@@ -180,8 +181,8 @@ class RelayConnection:
             # Payload
             payload = self._recv_exact(length)
             return header + length_bytes + payload
-        else:
-            return self._recv_variable_cell_v3()
+
+        return self._recv_variable_cell_v3()
 
     def _recv_variable_cell_v3(self) -> bytes:
         """Receive a variable-length cell with 2-byte CircID (for VERSIONS)."""
@@ -194,8 +195,9 @@ class RelayConnection:
         payload = self._recv_exact(length)
         return header + length_bytes + payload
 
-    def send_cell(self, cell: Cell) -> None:
+    def send_cell(self, cell: Any) -> None:
         """Send a cell using the negotiated link protocol."""
+        # Works with any cell type that has a pack() method
         self._send_raw(cell.pack(self.link_protocol))
 
     def recv_cell(self) -> Cell:
@@ -214,14 +216,14 @@ class RelayConnection:
             length = struct.unpack(">H", length_bytes)[0]
             payload = self._recv_exact(length)
             return Cell.unpack(header + length_bytes + payload, self.link_protocol)
+
+        # Fixed-length cell
+        if self.link_protocol >= 4:
+            body_len = CELL_LEN_V4 - 5
         else:
-            # Fixed-length cell
-            if self.link_protocol >= 4:
-                body_len = CELL_LEN_V4 - 5
-            else:
-                body_len = CELL_LEN_V3 - 3
-            body = self._recv_exact(body_len)
-            return Cell.unpack(header + body, self.link_protocol)
+            body_len = CELL_LEN_V3 - 3
+        body = self._recv_exact(body_len)
+        return Cell.unpack(header + body, self.link_protocol)
 
     def __enter__(self) -> "RelayConnection":
         """Context manager entry."""

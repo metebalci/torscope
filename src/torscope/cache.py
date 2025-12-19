@@ -5,9 +5,8 @@ Provides caching for consensus documents in .torscope/ directory.
 """
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 
 from torscope.directory.consensus import ConsensusParser
 from torscope.directory.models import ConsensusDocument
@@ -38,12 +37,12 @@ def save_consensus(content: bytes, authority: str) -> None:
     # Save metadata
     meta = {
         "authority": authority,
-        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "fetched_at": datetime.now(UTC).isoformat(),
     }
     CONSENSUS_META.write_text(json.dumps(meta))
 
 
-def load_consensus() -> Optional[ConsensusDocument]:
+def load_consensus() -> ConsensusDocument | None:
     """
     Load consensus from cache if valid.
 
@@ -72,7 +71,7 @@ def load_consensus() -> Optional[ConsensusDocument]:
         return None
 
 
-def get_cache_info() -> Optional[dict[str, str]]:
+def get_cache_info() -> dict[str, str] | None:
     """
     Get information about cached consensus.
 

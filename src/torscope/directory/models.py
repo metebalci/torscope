@@ -5,10 +5,11 @@ This module contains dataclasses for representing consensus documents,
 relay descriptors, and related data structures.
 """
 
+# pylint: disable=duplicate-code
+
 import base64
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 
 @dataclass
@@ -26,13 +27,13 @@ class RouterStatusEntry:
     # Optional fields
     ipv6_addresses: list[str] = field(default_factory=list)  # a lines
     flags: list[str] = field(default_factory=list)  # s line
-    version: Optional[str] = None  # v line
-    protocols: Optional[dict[str, list[int]]] = None  # pr line
-    bandwidth: Optional[int] = None  # w line (Bandwidth=)
-    measured: Optional[int] = None  # w line (Measured=)
+    version: str | None = None  # v line
+    protocols: dict[str, list[int]] | None = None  # pr line
+    bandwidth: int | None = None  # w line (Bandwidth=)
+    measured: int | None = None  # w line (Measured=)
     unmeasured: bool = False  # w line (Unmeasured=1)
-    exit_policy: Optional[str] = None  # p line
-    microdesc_hash: Optional[str] = None  # m line (base64)
+    exit_policy: str | None = None  # p line
+    microdesc_hash: str | None = None  # m line (base64)
 
     @property
     def fingerprint(self) -> str:
@@ -86,8 +87,8 @@ class AuthorityEntry:
     ip: str
     dirport: int
     orport: int
-    contact: Optional[str] = None
-    vote_digest: Optional[str] = None  # SHA1 in hex
+    contact: str | None = None
+    vote_digest: str | None = None  # SHA1 in hex
 
 
 @dataclass
@@ -98,7 +99,7 @@ class DirectorySignature:
     identity: str  # hex fingerprint
     signing_key_digest: str  # hex
     signature: str  # base64
-    verified: Optional[bool] = None  # Verification result
+    verified: bool | None = None  # Verification result
 
 
 @dataclass
@@ -117,8 +118,8 @@ class ConsensusDocument:
     server_versions: list[str] = field(default_factory=list)
     known_flags: list[str] = field(default_factory=list)
     params: dict[str, int] = field(default_factory=dict)  # Network parameters
-    shared_rand_current: Optional[tuple[int, str]] = None
-    shared_rand_previous: Optional[tuple[int, str]] = None
+    shared_rand_current: tuple[int, str] | None = None
+    shared_rand_previous: tuple[int, str] | None = None
 
     # Authorities
     authorities: list[AuthorityEntry] = field(default_factory=list)
@@ -135,18 +136,18 @@ class ConsensusDocument:
     # Metadata
     raw_document: str = ""  # Original text
     fetched_from: str = ""  # Authority nickname
-    fetched_at: Optional[datetime] = None
+    fetched_at: datetime | None = None
 
     @property
     def is_valid(self) -> bool:
         """Check if consensus is currently valid."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         return self.valid_after <= now <= self.valid_until
 
     @property
     def is_fresh(self) -> bool:
         """Check if consensus is fresh."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         return self.valid_after <= now <= self.fresh_until
 
     @property
@@ -177,7 +178,7 @@ class ConsensusDocument:
         from torscope.crypto import extract_signed_portion, verify_consensus_signature
 
         # Build a map of signing key fingerprint -> certificate
-        cert_map: dict[str, "KeyCertificate"] = {}
+        cert_map: dict[str, KeyCertificate] = {}
         for key_cert in certificates:
             try:
                 signing_fp = key_cert.signing_key_fingerprint
@@ -231,17 +232,17 @@ class Microdescriptor:
     digest: str  # base64-encoded
 
     # Keys
-    onion_key_rsa: Optional[str] = None  # PEM format (TAP, legacy)
-    onion_key_ntor: Optional[str] = None  # base64-encoded curve25519
-    ed25519_identity: Optional[str] = None  # base64 (id ed25519)
-    rsa1024_identity: Optional[str] = None  # base64 (id rsa1024)
+    onion_key_rsa: str | None = None  # PEM format (TAP, legacy)
+    onion_key_ntor: str | None = None  # base64-encoded curve25519
+    ed25519_identity: str | None = None  # base64 (id ed25519)
+    rsa1024_identity: str | None = None  # base64 (id rsa1024)
 
     # Network
     ipv6_addresses: list[str] = field(default_factory=list)
 
     # Exit policy
-    exit_policy_v4: Optional[str] = None  # "accept" or "reject" + portlist
-    exit_policy_v6: Optional[str] = None
+    exit_policy_v4: str | None = None  # "accept" or "reject" + portlist
+    exit_policy_v6: str | None = None
 
     # Family
     family_members: list[str] = field(default_factory=list)
@@ -249,7 +250,7 @@ class Microdescriptor:
 
     # Metadata
     raw_descriptor: str = ""
-    fetched_at: Optional[datetime] = None
+    fetched_at: datetime | None = None
 
     @property
     def is_exit(self) -> bool:
@@ -273,8 +274,8 @@ class ServerDescriptor:
     ipv6_addresses: list[str] = field(default_factory=list)
 
     # Platform/version info
-    platform: Optional[str] = None
-    tor_version: Optional[str] = None
+    platform: str | None = None
+    tor_version: str | None = None
 
     # Bandwidth
     bandwidth_avg: int = 0  # bytes/sec
@@ -282,18 +283,18 @@ class ServerDescriptor:
     bandwidth_observed: int = 0
 
     # Uptime
-    uptime: Optional[int] = None  # seconds
+    uptime: int | None = None  # seconds
 
     # Contact
-    contact: Optional[str] = None
+    contact: str | None = None
 
     # Exit policy
     exit_policy: list[str] = field(default_factory=list)
 
     # Keys
-    onion_key: Optional[str] = None  # RSA public key (PEM)
-    signing_key: Optional[str] = None  # RSA public key (PEM)
-    ntor_onion_key: Optional[str] = None  # curve25519 (base64)
+    onion_key: str | None = None  # RSA public key (PEM)
+    signing_key: str | None = None  # RSA public key (PEM)
+    ntor_onion_key: str | None = None  # curve25519 (base64)
 
     # Family
     family: list[str] = field(default_factory=list)
@@ -305,7 +306,7 @@ class ServerDescriptor:
     tunnelled_dir_server: bool = False
 
     # Protocols
-    protocols: Optional[dict[str, list[int]]] = None
+    protocols: dict[str, list[int]] | None = None
 
     # Raw descriptor
     raw_descriptor: str = ""
@@ -316,7 +317,7 @@ class ServerDescriptor:
         return self.bandwidth_observed / 1_000_000
 
     @property
-    def uptime_days(self) -> Optional[float]:
+    def uptime_days(self) -> float | None:
         """Get uptime in days."""
         if self.uptime is None:
             return None
@@ -442,9 +443,9 @@ class KeyCertificate:
     signing_key: str  # Medium-term signing key
 
     # Optional fields
-    address: Optional[str] = None  # IP:port of directory service
-    dir_key_crosscert: Optional[str] = None  # Cross-certification signature
-    dir_key_certification: Optional[str] = None  # Final signature by identity key
+    address: str | None = None  # IP:port of directory service
+    dir_key_crosscert: str | None = None  # Cross-certification signature
+    dir_key_certification: str | None = None  # Final signature by identity key
 
     # Raw certificate
     raw_certificate: str = ""

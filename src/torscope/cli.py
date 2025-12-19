@@ -5,7 +5,9 @@ Provides command-line tools for exploring the Tor network.
 """
 
 import argparse
+import base64
 import sys
+import traceback
 from collections.abc import Callable
 
 from torscope import __version__
@@ -17,6 +19,7 @@ from torscope.directory.descriptor import ServerDescriptorParser
 from torscope.directory.extra_info import ExtraInfoParser
 from torscope.directory.fallback import get_fallbacks
 from torscope.directory.models import ConsensusDocument
+from torscope.onion.circuit import Circuit
 from torscope.onion.connection import RelayConnection
 
 
@@ -45,8 +48,9 @@ def get_consensus(no_cache: bool = False) -> ConsensusDocument:
     print("Fetching consensus...", file=sys.stderr)
     content, used_authority = client.fetch_consensus(None, "microdesc")
     consensus = ConsensusParser.parse(content, used_authority.nickname)
-    print(f"Fetched {consensus.total_relays:,} relays from {used_authority.nickname}",
-          file=sys.stderr)
+    print(
+        f"Fetched {consensus.total_relays:,} relays from {used_authority.nickname}", file=sys.stderr
+    )
 
     # Save to cache
     save_consensus(content, used_authority.nickname)
@@ -365,9 +369,9 @@ def cmd_connect(args: argparse.Namespace) -> int:
                     print(f"  Auth methods: {conn.auth_challenge.methods}")
                 print("\n  Handshake successful!")
                 return 0
-            else:
-                print("  Handshake failed: no common protocol version", file=sys.stderr)
-                return 1
+
+            print("  Handshake failed: no common protocol version", file=sys.stderr)
+            return 1
 
         except ConnectionError as e:
             print(f"  Connection error: {e}", file=sys.stderr)
@@ -378,6 +382,102 @@ def cmd_connect(args: argparse.Namespace) -> int:
     # pylint: disable-next=broad-exception-caught
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_circuit(args: argparse.Namespace) -> int:  # pylint: disable=too-many-return-statements
+    """Test circuit creation with a relay."""
+    try:
+        consensus = get_consensus(args.no_cache)
+
+        # Find relay by fingerprint or nickname
+        query = args.query.upper()
+        relay = None
+
+        for r in consensus.routers:
+            if r.fingerprint.startswith(query):
+                relay = r
+                break
+            if r.nickname.upper() == query:
+                relay = r
+                break
+
+        if relay is None:
+            print(f"Relay not found: {args.query}", file=sys.stderr)
+            return 1
+
+        # Fetch server descriptor to get ntor-onion-key
+        client = DirectoryClient()
+        print(f"Fetching descriptor for {relay.nickname}...", file=sys.stderr)
+        content, _ = client.fetch_server_descriptors([relay.fingerprint])
+        descriptors = ServerDescriptorParser.parse(content)
+
+        if not descriptors:
+            print(f"No descriptor found for {relay.nickname}", file=sys.stderr)
+            return 1
+
+        desc = descriptors[0]
+        if not desc.ntor_onion_key:
+            print(f"Relay {relay.nickname} has no ntor-onion-key", file=sys.stderr)
+            return 1
+
+        # Decode the ntor-onion-key (base64, may need padding)
+        key_b64 = desc.ntor_onion_key
+        # Add padding if necessary
+        padding = 4 - len(key_b64) % 4
+        if padding != 4:
+            key_b64 += "=" * padding
+        ntor_key = base64.b64decode(key_b64)
+
+        print(f"\nCreating circuit to {relay.nickname} ({relay.ip}:{relay.orport})...")
+
+        conn = RelayConnection(host=relay.ip, port=relay.orport, timeout=args.timeout)
+
+        try:
+            conn.connect()
+            print("  TLS connection established")
+
+            if not conn.handshake():
+                print("  Link handshake failed", file=sys.stderr)
+                return 1
+            print(f"  Link protocol: v{conn.link_protocol}")
+
+            # Create circuit
+            circuit = Circuit.create(conn)
+            print(f"  Circuit ID: {circuit.circ_id:#010x}")
+
+            # Extend to relay
+            if circuit.extend_to(relay.fingerprint, ntor_key):
+                print("  ntor handshake successful!")
+                print(f"  Circuit state: {circuit.state.name}")
+
+                # Show derived keys (first 8 bytes of each for brevity)
+                if circuit.hops and circuit.hops[0].keys:
+                    keys = circuit.hops[0].keys
+                    print("\n  Derived keys:")
+                    print(f"    Kf: {keys.key_forward.hex()[:16]}...")
+                    print(f"    Kb: {keys.key_backward.hex()[:16]}...")
+
+                print("\n  Circuit created successfully!")
+
+                # Clean up
+                circuit.destroy()
+                print("  Circuit destroyed")
+                return 0
+
+            print("  Circuit creation failed", file=sys.stderr)
+            return 1
+
+        except ConnectionError as e:
+            print(f"  Connection error: {e}", file=sys.stderr)
+            return 1
+        finally:
+            conn.close()
+
+    # pylint: disable-next=broad-exception-caught
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        traceback.print_exc()
         return 1
 
 
@@ -452,16 +552,24 @@ def main() -> int:
     )
 
     # connect command
-    connect_parser = subparsers.add_parser(
-        "connect", help="Test OR protocol connection to a relay"
-    )
+    connect_parser = subparsers.add_parser("connect", help="Test OR protocol connection to a relay")
     connect_parser.add_argument(
         "query", metavar="nickname|fingerprint", help="Relay nickname or fingerprint"
     )
+    connect_parser.add_argument("--no-cache", action="store_true", help="Bypass cache, fetch fresh")
     connect_parser.add_argument(
-        "--no-cache", action="store_true", help="Bypass cache, fetch fresh"
+        "--timeout", type=float, default=30.0, help="Connection timeout (default: 30s)"
     )
-    connect_parser.add_argument(
+
+    # circuit command
+    circuit_parser = subparsers.add_parser(
+        "circuit", help="Test circuit creation (ntor handshake) with a relay"
+    )
+    circuit_parser.add_argument(
+        "query", metavar="nickname|fingerprint", help="Relay nickname or fingerprint"
+    )
+    circuit_parser.add_argument("--no-cache", action="store_true", help="Bypass cache, fetch fresh")
+    circuit_parser.add_argument(
         "--timeout", type=float, default=30.0, help="Connection timeout (default: 30s)"
     )
 
@@ -480,6 +588,7 @@ def main() -> int:
         "relay": cmd_relay,
         "extra-info": cmd_extra_info,
         "connect": cmd_connect,
+        "circuit": cmd_circuit,
     }
 
     try:

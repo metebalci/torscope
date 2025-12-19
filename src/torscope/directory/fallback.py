@@ -8,6 +8,9 @@ Fallback directories are stable relays that can be used for
 bootstrapping when directory authorities are unreachable.
 """
 
+# pylint: disable=too-many-lines
+
+import random
 from dataclasses import dataclass
 
 
@@ -1327,15 +1330,11 @@ def get_fallbacks() -> list[FallbackDirectory]:
 
 def get_random_fallback() -> FallbackDirectory:
     """Get a random fallback directory."""
-    import random
-
     return random.choice(FALLBACK_DIRECTORIES)
 
 
 def get_shuffled_fallbacks() -> list[FallbackDirectory]:
     """Get all fallback directories in random order."""
-    import random
-
     fallbacks = list(FALLBACK_DIRECTORIES)
     random.shuffle(fallbacks)
     return fallbacks

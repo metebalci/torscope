@@ -4,9 +4,10 @@ Server descriptor parsing.
 This module provides functionality to parse Tor server descriptors.
 """
 
+# pylint: disable=duplicate-code
+
 import re
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 from torscope.directory.models import ServerDescriptor
 
@@ -61,7 +62,7 @@ class ServerDescriptorParser:
         return descriptors
 
     @staticmethod
-    def _parse_single(text: str) -> Optional[ServerDescriptor]:
+    def _parse_single(text: str) -> ServerDescriptor | None:
         """Parse a single server descriptor."""
         lines = text.split("\n")
         i = 0
@@ -83,25 +84,25 @@ class ServerDescriptorParser:
 
         # Initialize with defaults
         fingerprint = ""
-        published = datetime.now(timezone.utc)
-        platform: Optional[str] = None
-        tor_version: Optional[str] = None
+        published = datetime.now(UTC)
+        platform: str | None = None
+        tor_version: str | None = None
         bandwidth_avg = 0
         bandwidth_burst = 0
         bandwidth_observed = 0
-        uptime: Optional[int] = None
-        contact: Optional[str] = None
+        uptime: int | None = None
+        contact: str | None = None
         exit_policy: list[str] = []
-        onion_key: Optional[str] = None
-        signing_key: Optional[str] = None
-        ntor_onion_key: Optional[str] = None
+        onion_key: str | None = None
+        signing_key: str | None = None
+        ntor_onion_key: str | None = None
         family: list[str] = []
         ipv6_addresses: list[str] = []
         hibernating = False
         allow_single_hop_exits = False
         caches_extra_info = False
         tunnelled_dir_server = False
-        protocols: Optional[dict[str, list[int]]] = None
+        protocols: dict[str, list[int]] | None = None
 
         i = 1
         while i < len(lines):
@@ -117,7 +118,7 @@ class ServerDescriptorParser:
                 try:
                     dt_str = line[10:].strip()
                     published = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
-                    published = published.replace(tzinfo=timezone.utc)
+                    published = published.replace(tzinfo=UTC)
                 except ValueError:
                     pass
 

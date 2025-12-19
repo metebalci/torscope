@@ -6,19 +6,41 @@ and communicating with relays.
 """
 
 from torscope.onion.cell import (
+    HTYPE_NTOR,
     AuthChallengeCell,
     Cell,
     CellCommand,
     CertsCell,
+    Create2Cell,
+    Created2Cell,
+    DestroyCell,
     NetInfoCell,
     VersionsCell,
 )
+from torscope.onion.circuit import Circuit, CircuitHop, CircuitState
+from torscope.onion.connection import RelayConnection
+from torscope.onion.ntor import CircuitKeys, NtorClientState, node_id_from_fingerprint
 
 __all__ = [
+    # Cells
     "Cell",
     "CellCommand",
     "VersionsCell",
     "NetInfoCell",
     "CertsCell",
     "AuthChallengeCell",
+    "Create2Cell",
+    "Created2Cell",
+    "DestroyCell",
+    "HTYPE_NTOR",
+    # Connection
+    "RelayConnection",
+    # Circuit
+    "Circuit",
+    "CircuitHop",
+    "CircuitKeys",
+    "CircuitState",
+    # ntor
+    "NtorClientState",
+    "node_id_from_fingerprint",
 ]

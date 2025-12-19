@@ -8,7 +8,7 @@ information for path selection.
 
 import base64
 import hashlib
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from torscope.directory.models import Microdescriptor
 
@@ -166,5 +166,5 @@ class MicrodescriptorParser:
             family_members=family_members,
             family_ids=family_ids,
             raw_descriptor=raw_descriptor,
-            fetched_at=datetime.now(timezone.utc),
+            fetched_at=datetime.now(UTC),
         )

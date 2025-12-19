@@ -88,11 +88,11 @@ class Cell:
             # Variable-length cell: header + length (2 bytes) + payload
             length = struct.pack(">H", len(self.payload))
             return header + length + self.payload
-        else:
-            # Fixed-length cell: header + payload padded to cell_len
-            body_len = cell_len - header_len
-            payload = self.payload[:body_len].ljust(body_len, b"\x00")
-            return header + payload
+
+        # Fixed-length cell: header + payload padded to cell_len
+        body_len = cell_len - header_len
+        payload = self.payload[:body_len].ljust(body_len, b"\x00")
+        return header + payload
 
     @classmethod
     def unpack(cls, data: bytes, link_protocol: int = 4) -> "Cell":
@@ -344,3 +344,117 @@ class AuthChallengeCell:
             methods.append(method)
 
         return cls(challenge=challenge, methods=methods)
+
+
+# Handshake types for CREATE2
+HTYPE_TAP = 0x0000  # Obsolete
+HTYPE_NTOR = 0x0002  # ntor (current)
+HTYPE_NTOR_V3 = 0x0003  # ntor-v3
+
+
+@dataclass
+class Create2Cell:
+    """
+    CREATE2 cell for circuit creation.
+
+    Used to create a circuit with a specified handshake type.
+    """
+
+    circ_id: int
+    htype: int  # Handshake type (HTYPE_NTOR = 0x0002)
+    hdata: bytes  # Handshake data (84 bytes for ntor)
+
+    def pack(self, link_protocol: int = 4) -> bytes:
+        """Pack CREATE2 cell."""
+        # Payload: HTYPE (2 bytes) + HLEN (2 bytes) + HDATA
+        payload = struct.pack(">HH", self.htype, len(self.hdata)) + self.hdata
+
+        # Create fixed-length cell
+        cell = Cell(circ_id=self.circ_id, command=CellCommand.CREATE2, payload=payload)
+        return cell.pack(link_protocol)
+
+    @classmethod
+    def unpack(cls, data: bytes, link_protocol: int = 4) -> "Create2Cell":
+        """Unpack CREATE2 cell."""
+        cell = Cell.unpack(data, link_protocol)
+        payload = cell.payload
+
+        htype = struct.unpack(">H", payload[0:2])[0]
+        hlen = struct.unpack(">H", payload[2:4])[0]
+        hdata = payload[4 : 4 + hlen]
+
+        return cls(circ_id=cell.circ_id, htype=htype, hdata=hdata)
+
+
+@dataclass
+class Created2Cell:
+    """
+    CREATED2 cell - response to CREATE2.
+
+    Contains server's handshake response.
+    """
+
+    circ_id: int
+    hdata: bytes  # Server handshake data (64 bytes for ntor: Y + AUTH)
+
+    def pack(self, link_protocol: int = 4) -> bytes:
+        """Pack CREATED2 cell."""
+        # Payload: HLEN (2 bytes) + HDATA
+        payload = struct.pack(">H", len(self.hdata)) + self.hdata
+
+        # Create fixed-length cell
+        cell = Cell(circ_id=self.circ_id, command=CellCommand.CREATED2, payload=payload)
+        return cell.pack(link_protocol)
+
+    @classmethod
+    def unpack(cls, data: bytes, link_protocol: int = 4) -> "Created2Cell":
+        """Unpack CREATED2 cell."""
+        cell = Cell.unpack(data, link_protocol)
+        payload = cell.payload
+
+        hlen = struct.unpack(">H", payload[0:2])[0]
+        hdata = payload[2 : 2 + hlen]
+
+        return cls(circ_id=cell.circ_id, hdata=hdata)
+
+
+@dataclass
+class DestroyCell:
+    """
+    DESTROY cell - tear down a circuit.
+
+    Sent when a circuit should be closed.
+    """
+
+    circ_id: int
+    reason: int = 0  # Destroy reason code
+
+    # Destroy reason codes
+    REASON_NONE = 0
+    REASON_PROTOCOL = 1
+    REASON_INTERNAL = 2
+    REASON_REQUESTED = 3
+    REASON_HIBERNATING = 4
+    REASON_RESOURCELIMIT = 5
+    REASON_CONNECTFAILED = 6
+    REASON_OR_IDENTITY = 7
+    REASON_CHANNEL_CLOSED = 8
+    REASON_FINISHED = 9
+    REASON_TIMEOUT = 10
+    REASON_DESTROYED = 11
+    REASON_NOSUCHSERVICE = 12
+
+    def pack(self, link_protocol: int = 4) -> bytes:
+        """Pack DESTROY cell."""
+        # Payload: just the reason byte
+        payload = bytes([self.reason])
+
+        cell = Cell(circ_id=self.circ_id, command=CellCommand.DESTROY, payload=payload)
+        return cell.pack(link_protocol)
+
+    @classmethod
+    def unpack(cls, data: bytes, link_protocol: int = 4) -> "DestroyCell":
+        """Unpack DESTROY cell."""
+        cell = Cell.unpack(data, link_protocol)
+        reason = cell.payload[0] if cell.payload else 0
+        return cls(circ_id=cell.circ_id, reason=reason)

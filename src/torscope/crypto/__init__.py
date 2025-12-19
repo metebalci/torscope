@@ -166,7 +166,7 @@ def extract_signed_portion(
     consensus_text: str,
     signature_identity: str,
     signature_algorithm: str = "sha1",  # pylint: disable=unused-argument
-) -> Optional[bytes]:
+) -> bytes | None:
     """
     Extract the portion of a consensus document that was signed.
 

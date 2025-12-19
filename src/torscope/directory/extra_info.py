@@ -6,8 +6,10 @@ which contain relay statistics like bandwidth history, exit traffic,
 and directory request statistics.
 """
 
+# pylint: disable=duplicate-code
+
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from torscope.directory.models import BandwidthHistory, ExtraInfoDescriptor
 
@@ -78,7 +80,7 @@ class ExtraInfoParser:
         fingerprint = parts[2].upper()
 
         # Initialize with defaults
-        published = datetime.now(timezone.utc)
+        published = datetime.now(UTC)
         write_history: BandwidthHistory | None = None
         read_history: BandwidthHistory | None = None
         dirreq_write_history: BandwidthHistory | None = None
@@ -213,9 +215,9 @@ class ExtraInfoParser:
         """Parse datetime string like '2024-01-15 12:00:00'."""
         try:
             dt = datetime.strptime(dt_str.strip(), "%Y-%m-%d %H:%M:%S")
-            return dt.replace(tzinfo=timezone.utc)
+            return dt.replace(tzinfo=UTC)
         except ValueError:
-            return datetime.now(timezone.utc)
+            return datetime.now(UTC)
 
     @staticmethod
     def _parse_stats_end(line: str) -> datetime | None:

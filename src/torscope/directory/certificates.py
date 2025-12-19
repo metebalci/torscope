@@ -4,7 +4,7 @@ Key certificate parsing.
 This module provides functionality to parse Tor authority key certificates.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from torscope.directory.models import KeyCertificate
 
@@ -43,8 +43,8 @@ class KeyCertificateParser:
 
         version = 3
         fingerprint = ""
-        published = datetime.now(timezone.utc)
-        expires = datetime.now(timezone.utc)
+        published = datetime.now(UTC)
+        expires = datetime.now(UTC)
         identity_key = ""
         signing_key = ""
         address: str | None = None
@@ -153,4 +153,4 @@ class KeyCertificateParser:
         try:
             return datetime.strptime(date_str.strip(), "%Y-%m-%d %H:%M:%S")
         except ValueError:
-            return datetime.now(timezone.utc)
+            return datetime.now(UTC)

@@ -5,8 +5,6 @@ This module provides functionality to fetch consensus documents and descriptors
 from Tor directory authorities.
 """
 
-from typing import Optional
-
 import httpx
 
 from torscope.directory.authority import (
@@ -30,7 +28,7 @@ class DirectoryClient:
 
     def fetch_consensus(
         self,
-        authority: Optional[DirectoryAuthority] = None,
+        authority: DirectoryAuthority | None = None,
         consensus_type: str = "microdesc",
     ) -> tuple[bytes, DirectoryAuthority]:
         """
@@ -93,7 +91,7 @@ class DirectoryClient:
     def fetch_microdescriptors(
         self,
         hashes: list[str],
-        authority: Optional[DirectoryAuthority] = None,
+        authority: DirectoryAuthority | None = None,
     ) -> tuple[bytes, DirectoryAuthority]:
         """
         Fetch microdescriptors by their hashes.
@@ -128,7 +126,7 @@ class DirectoryClient:
     def fetch_server_descriptors(
         self,
         fingerprints: list[str],
-        authority: Optional[DirectoryAuthority] = None,
+        authority: DirectoryAuthority | None = None,
     ) -> tuple[bytes, DirectoryAuthority]:
         """
         Fetch server descriptors by fingerprints.
@@ -163,7 +161,7 @@ class DirectoryClient:
     def fetch_extra_info(
         self,
         fingerprints: list[str],
-        authority: Optional[DirectoryAuthority] = None,
+        authority: DirectoryAuthority | None = None,
     ) -> tuple[bytes, DirectoryAuthority]:
         """
         Fetch extra-info descriptors by fingerprints.
@@ -197,7 +195,7 @@ class DirectoryClient:
 
     def fetch_key_certificates(
         self,
-        authority: Optional[DirectoryAuthority] = None,
+        authority: DirectoryAuthority | None = None,
     ) -> tuple[bytes, DirectoryAuthority]:
         """
         Fetch all authority key certificates.
