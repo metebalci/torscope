@@ -27,69 +27,6 @@ A tool for exploring and getting information about the Tor network.
 pip install torscope
 ```
 
-## Quick Start
-
-```bash
-# List all directory authorities
-torscope authorities
-
-# List fallback directories
-torscope fallbacks
-
-# List all relays
-torscope relays
-
-# List Guard relays only
-torscope relays --flags Guard
-
-# View details for a specific relay
-torscope relay moria1
-
-# View extra-info statistics for a relay
-torscope extra-info moria1
-
-# Test OR protocol connection to a relay
-torscope connect moria1
-
-# Create a circuit (ntor handshake) with a relay
-torscope circuit moria1
-```
-
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `version` | Display torscope version |
-| `authorities` | List all 9 directory authorities |
-| `fallbacks` | List fallback directories (~200) |
-| `relays` | List relays from network consensus |
-| `relay <name>` | Show detailed info for a specific relay |
-| `extra-info <name>` | Show extra-info statistics for a relay |
-| `connect <name>` | Test OR protocol connection (TLS + link handshake) |
-| `circuit <name>` | Test circuit creation (ntor handshake) |
-
-## Example Output
-
-### Circuit Creation
-```
-$ torscope circuit moria1
-Fetching descriptor for moria1...
-
-Creating circuit to moria1 (128.31.0.39:9201)...
-  TLS connection established
-  Link protocol: v5
-  Circuit ID: 0xbb985328
-  ntor handshake successful!
-  Circuit state: OPEN
-
-  Derived keys:
-    Kf: 3c639f2d33e08d19...
-    Kb: 0cb35e627f489571...
-
-  Circuit created successfully!
-  Circuit destroyed
-```
-
 ## License
 
 torscope Tor Network Information Tool
