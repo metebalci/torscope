@@ -8,6 +8,7 @@ See: https://spec.torproject.org/tor-spec/relay-cells.html
 """
 
 import hashlib
+import socket
 import struct
 from dataclasses import dataclass, field
 from enum import IntEnum
@@ -189,7 +190,7 @@ class RelayCrypto:
 
     Each direction (forward/backward) has:
     - AES-128-CTR cipher state (maintains counter across cells)
-    - Running SHA-1 digest state
+    - Running SHA-1 digest state (maintained as hashlib object)
     """
 
     # AES-128-CTR cipher for encryption (forward direction)
@@ -200,9 +201,10 @@ class RelayCrypto:
     _cipher_backward: Cipher | None = field(default=None, repr=False)
     _decryptor: CipherContext | None = field(default=None, repr=False)
 
-    # Running digest state (forward/backward)
-    _digest_forward: bytes = field(default=b"", repr=False)
-    _digest_backward: bytes = field(default=b"", repr=False)
+    # Running SHA-1 digest state objects (forward/backward)
+    # These maintain incremental state across all cells
+    _digest_forward_state: "hashlib._Hash | None" = field(default=None, repr=False)
+    _digest_backward_state: "hashlib._Hash | None" = field(default=None, repr=False)
 
     @classmethod
     def create(
@@ -218,8 +220,8 @@ class RelayCrypto:
         Args:
             key_forward: 16-byte AES key for forward direction (Kf)
             key_backward: 16-byte AES key for backward direction (Kb)
-            digest_forward: 20-byte initial digest state for forward (Df)
-            digest_backward: 20-byte initial digest state for backward (Db)
+            digest_forward: 20-byte initial digest seed for forward (Df)
+            digest_backward: 20-byte initial digest seed for backward (Db)
         """
         if len(key_forward) != 16:
             raise ValueError("key_forward must be 16 bytes")
@@ -237,13 +239,20 @@ class RelayCrypto:
         cipher_forward = Cipher(algorithms.AES(key_forward), modes.CTR(iv))
         cipher_backward = Cipher(algorithms.AES(key_backward), modes.CTR(iv))
 
+        # Initialize running SHA-1 digest states
+        # The digest is seeded with Df/Db and maintains incremental state
+        digest_forward_state = hashlib.sha1()
+        digest_forward_state.update(digest_forward)
+        digest_backward_state = hashlib.sha1()
+        digest_backward_state.update(digest_backward)
+
         instance = cls()
         instance._cipher_forward = cipher_forward
         instance._cipher_backward = cipher_backward
         instance._encryptor = cipher_forward.encryptor()
         instance._decryptor = cipher_backward.decryptor()
-        instance._digest_forward = digest_forward
-        instance._digest_backward = digest_backward
+        instance._digest_forward_state = digest_forward_state
+        instance._digest_backward_state = digest_backward_state
 
         return instance
 
@@ -252,7 +261,7 @@ class RelayCrypto:
         Encrypt a relay cell for sending (forward direction).
 
         1. Pack cell with digest=0
-        2. Update running digest with packed cell
+        2. Update running digest state with packed cell
         3. Insert first 4 bytes of digest
         4. Encrypt with AES-CTR
 
@@ -264,17 +273,21 @@ class RelayCrypto:
         """
         if self._encryptor is None:
             raise RuntimeError("RelayCrypto not initialized")
+        if self._digest_forward_state is None:
+            raise RuntimeError("Forward digest not initialized")
 
         # Pack with zero digest first
         relay_cell.digest = b"\x00\x00\x00\x00"
         payload = relay_cell.pack_payload()
 
-        # Update running digest
-        self._digest_forward = self._update_digest(self._digest_forward, payload)
+        # Update running digest state and get current digest
+        # We need to copy() because digest() finalizes the hash
+        self._digest_forward_state.update(payload)
+        current_digest = self._digest_forward_state.copy().digest()
 
         # Replace digest field with first 4 bytes of running digest
         # Digest is at offset 5 (cmd=1, recognized=2, stream_id=2)
-        payload = payload[:5] + self._digest_forward[:4] + payload[9:]
+        payload = payload[:5] + current_digest[:4] + payload[9:]
 
         # Encrypt
         return self._encryptor.update(payload)
@@ -285,7 +298,7 @@ class RelayCrypto:
 
         1. Decrypt with AES-CTR
         2. Check if recognized == 0
-        3. Zero digest field, update running digest
+        3. Zero digest field, update running digest state
         4. Compare computed digest with received digest
         5. Return cell if valid, None otherwise
 
@@ -297,6 +310,8 @@ class RelayCrypto:
         """
         if self._decryptor is None:
             raise RuntimeError("RelayCrypto not initialized")
+        if self._digest_backward_state is None:
+            raise RuntimeError("Backward digest not initialized")
 
         # Decrypt
         payload = self._decryptor.update(encrypted_payload)
@@ -312,8 +327,8 @@ class RelayCrypto:
 
         # Zero digest field and compute expected digest
         zeroed_payload = payload[:5] + b"\x00\x00\x00\x00" + payload[9:]
-        self._digest_backward = self._update_digest(self._digest_backward, zeroed_payload)
-        expected_digest = self._digest_backward[:4]
+        self._digest_backward_state.update(zeroed_payload)
+        expected_digest = self._digest_backward_state.copy().digest()[:4]
 
         # Verify digest
         if received_digest != expected_digest:
@@ -323,28 +338,39 @@ class RelayCrypto:
         # Parse and return
         return RelayCell.unpack_payload(payload)
 
-    def _update_digest(self, current_digest: bytes, data: bytes) -> bytes:
+    def encrypt_raw(self, payload: bytes) -> bytes:
         """
-        Update running digest with new data.
+        Raw AES-CTR encryption (for intermediate hops in multi-hop circuits).
 
-        The running digest is computed incrementally using SHA-1.
-        We seed it with Df or Db from the key material.
+        This is used when adding encryption layers for hops before the exit.
+        No digest handling - just raw encryption.
 
         Args:
-            current_digest: Current 20-byte digest state
-            data: Data to add to digest
+            payload: 509-byte payload (already encrypted by inner layers)
 
         Returns:
-            New 20-byte digest state
+            Encrypted payload
         """
-        # Tor uses a running SHA-1 hash
-        # The digest state is the intermediate hash value
-        # For simplicity, we concatenate and hash
-        # Note: Real Tor maintains incremental SHA-1 state
-        h = hashlib.sha1()
-        h.update(current_digest)
-        h.update(data)
-        return h.digest()
+        if self._encryptor is None:
+            raise RuntimeError("RelayCrypto not initialized")
+        return self._encryptor.update(payload)
+
+    def decrypt_raw(self, payload: bytes) -> bytes:
+        """
+        Raw AES-CTR decryption (for intermediate hops in multi-hop circuits).
+
+        This is used when peeling encryption layers from hops before the exit.
+        No digest handling - just raw decryption.
+
+        Args:
+            payload: 509-byte encrypted payload
+
+        Returns:
+            Decrypted payload
+        """
+        if self._decryptor is None:
+            raise RuntimeError("RelayCrypto not initialized")
+        return self._decryptor.update(payload)
 
 
 def create_begin_payload(address: str, port: int, flags: int = 0) -> bytes:
@@ -412,3 +438,92 @@ def create_end_payload(reason: RelayEndReason = RelayEndReason.DONE) -> bytes:
         END cell payload (1 byte reason)
     """
     return bytes([reason])
+
+
+class LinkSpecifierType(IntEnum):
+    """Link specifier types for EXTEND2."""
+
+    TLS_TCP_IPV4 = 0  # IPv4 address + port (6 bytes)
+    TLS_TCP_IPV6 = 1  # IPv6 address + port (18 bytes)
+    LEGACY_ID = 2  # Legacy identity - SHA1 fingerprint (20 bytes)
+    ED25519_ID = 3  # Ed25519 identity key (32 bytes)
+
+
+@dataclass
+class LinkSpecifier:
+    """A link specifier for EXTEND2 cell."""
+
+    spec_type: LinkSpecifierType
+    data: bytes
+
+    def pack(self) -> bytes:
+        """Pack link specifier: LSTYPE (1) + LSLEN (1) + LSPEC (LSLEN)."""
+        return struct.pack("BB", self.spec_type, len(self.data)) + self.data
+
+    @classmethod
+    def from_ipv4(cls, ip: str, port: int) -> "LinkSpecifier":
+        """Create IPv4 link specifier."""
+        ip_bytes = bytes(int(x) for x in ip.split("."))
+        data = ip_bytes + struct.pack(">H", port)
+        return cls(spec_type=LinkSpecifierType.TLS_TCP_IPV4, data=data)
+
+    @classmethod
+    def from_ipv6(cls, ip: str, port: int) -> "LinkSpecifier":
+        """Create IPv6 link specifier."""
+        ip_bytes = socket.inet_pton(socket.AF_INET6, ip)
+        data = ip_bytes + struct.pack(">H", port)
+        return cls(spec_type=LinkSpecifierType.TLS_TCP_IPV6, data=data)
+
+    @classmethod
+    def from_legacy_id(cls, fingerprint: str) -> "LinkSpecifier":
+        """Create legacy identity link specifier from hex fingerprint."""
+        fp_bytes = bytes.fromhex(fingerprint.replace(" ", "").replace("$", ""))
+        return cls(spec_type=LinkSpecifierType.LEGACY_ID, data=fp_bytes)
+
+    @classmethod
+    def from_ed25519_id(cls, ed_key: bytes) -> "LinkSpecifier":
+        """Create Ed25519 identity link specifier."""
+        return cls(spec_type=LinkSpecifierType.ED25519_ID, data=ed_key)
+
+
+def create_extend2_payload(
+    link_specifiers: list[LinkSpecifier],
+    htype: int,
+    hdata: bytes,
+) -> bytes:
+    """
+    Create payload for RELAY_EXTEND2 cell.
+
+    Args:
+        link_specifiers: List of link specifiers for the target relay
+        htype: Handshake type (0x0002 for ntor)
+        hdata: Handshake data (onion skin, 84 bytes for ntor)
+
+    Returns:
+        EXTEND2 payload bytes
+    """
+    # NSPEC (1 byte)
+    payload = struct.pack("B", len(link_specifiers))
+
+    # Link specifiers
+    for spec in link_specifiers:
+        payload += spec.pack()
+
+    # HTYPE (2 bytes) + HLEN (2 bytes) + HDATA
+    payload += struct.pack(">HH", htype, len(hdata)) + hdata
+
+    return payload
+
+
+def parse_extended2_payload(payload: bytes) -> bytes:
+    """
+    Parse RELAY_EXTENDED2 payload (same format as CREATED2).
+
+    Args:
+        payload: EXTENDED2 cell payload
+
+    Returns:
+        HDATA (server handshake response)
+    """
+    hlen = struct.unpack(">H", payload[0:2])[0]
+    return payload[2 : 2 + hlen]

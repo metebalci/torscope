@@ -23,12 +23,15 @@ from torscope.onion.ntor import CircuitKeys, NtorClientState, node_id_from_finge
 from torscope.onion.relay import (
     RELAY_BODY_LEN,
     RELAY_DATA_LEN,
+    LinkSpecifier,
     RelayCell,
     RelayCommand,
     RelayCrypto,
     RelayEndReason,
     create_begin_payload,
     create_end_payload,
+    create_extend2_payload,
+    parse_extended2_payload,
 )
 
 
@@ -56,14 +59,14 @@ class Circuit:
     """
     A Tor circuit through one or more relays.
 
-    Currently supports single-hop circuits for testing.
+    Supports multi-hop circuits with layered encryption.
     """
 
     connection: RelayConnection
     circ_id: int = 0
     state: CircuitState = CircuitState.NEW
     hops: list[CircuitHop] = field(default_factory=list)
-    _crypto: RelayCrypto | None = field(default=None, repr=False)
+    _crypto_layers: list[RelayCrypto] = field(default_factory=list, repr=False)
     _next_stream_id: int = field(default=1, repr=False)
 
     @classmethod
@@ -88,26 +91,26 @@ class Circuit:
         self,
         fingerprint: str,
         ntor_onion_key: bytes,
+        ip: str | None = None,
+        port: int | None = None,
     ) -> bool:
         """
-        Extend circuit to a relay (create first hop or extend).
+        Extend circuit to a relay (create first hop or extend through existing hops).
 
-        For now, only supports creating the first hop.
+        For the first hop, uses CREATE2 cell directly.
+        For subsequent hops, uses RELAY_EXTEND2 through the existing circuit.
 
         Args:
             fingerprint: Relay's fingerprint (40 hex chars)
             ntor_onion_key: Relay's ntor-onion-key (32 bytes, base64 decoded)
+            ip: Relay's IP address (required for extending, optional for first hop)
+            port: Relay's OR port (required for extending, optional for first hop)
 
         Returns:
             True if handshake succeeded, False otherwise
         """
         if self.state == CircuitState.CLOSED:
             raise RuntimeError("Circuit is closed")
-
-        if len(self.hops) > 0:
-            raise NotImplementedError("Multi-hop circuits not yet implemented")
-
-        self.state = CircuitState.BUILDING
 
         # Get node ID from fingerprint
         node_id = node_id_from_fingerprint(fingerprint)
@@ -117,6 +120,26 @@ class Circuit:
 
         # Create onion skin (client's handshake data)
         onion_skin = ntor_state.create_onion_skin()
+
+        if len(self.hops) == 0:
+            # First hop - use CREATE2
+            return self._create_first_hop(fingerprint, ntor_onion_key, ntor_state, onion_skin)
+
+        # Extending - use RELAY_EXTEND2
+        if ip is None or port is None:
+            raise ValueError("ip and port required for extending circuit")
+
+        return self._extend_circuit(fingerprint, ntor_onion_key, ntor_state, onion_skin, ip, port)
+
+    def _create_first_hop(
+        self,
+        fingerprint: str,
+        ntor_onion_key: bytes,
+        ntor_state: NtorClientState,
+        onion_skin: bytes,
+    ) -> bool:
+        """Create the first hop using CREATE2 cell."""
+        self.state = CircuitState.BUILDING
 
         # Send CREATE2 cell
         create2 = Create2Cell(
@@ -131,7 +154,6 @@ class Circuit:
 
         if response.command == CellCommand.CREATED2:
             # Extract HDATA from CREATED2 payload
-            # Payload format: HLEN (2 bytes) + HDATA
             hlen = struct.unpack(">H", response.payload[0:2])[0]
             hdata = response.payload[2 : 2 + hlen]
 
@@ -151,24 +173,97 @@ class Circuit:
             )
             self.hops.append(hop)
 
-            # Initialize crypto for relay cells
-            self._crypto = RelayCrypto.create(
-                key_forward=keys.key_forward,
-                key_backward=keys.key_backward,
-                digest_forward=keys.digest_forward,
-                digest_backward=keys.digest_backward,
+            # Add crypto layer
+            self._crypto_layers.append(
+                RelayCrypto.create(
+                    key_forward=keys.key_forward,
+                    key_backward=keys.key_backward,
+                    digest_forward=keys.digest_forward,
+                    digest_backward=keys.digest_backward,
+                )
             )
 
             self.state = CircuitState.OPEN
             return True
 
         if response.command == CellCommand.DESTROY:
-            # Circuit creation was rejected
             self.state = CircuitState.FAILED
             return False
 
-        # Unexpected response
         self.state = CircuitState.FAILED
+        return False
+
+    def _extend_circuit(  # pylint: disable=too-many-arguments
+        self,
+        fingerprint: str,
+        ntor_onion_key: bytes,
+        ntor_state: NtorClientState,
+        onion_skin: bytes,
+        ip: str,
+        port: int,
+    ) -> bool:
+        """Extend circuit using RELAY_EXTEND2."""
+        # Build link specifiers
+        link_specs = [
+            LinkSpecifier.from_ipv4(ip, port),
+            LinkSpecifier.from_legacy_id(fingerprint),
+        ]
+
+        # Create EXTEND2 payload
+        extend2_data = create_extend2_payload(
+            link_specifiers=link_specs,
+            htype=HTYPE_NTOR,
+            hdata=onion_skin,
+        )
+
+        # Send RELAY_EXTEND2 (stream_id must be 0 for control messages)
+        # Must use RELAY_EARLY cell for EXTEND2 per tor-spec
+        extend2_cell = RelayCell(
+            relay_command=RelayCommand.EXTEND2,
+            stream_id=0,
+            data=extend2_data,
+        )
+        self.send_relay(extend2_cell, early=True)
+
+        # Wait for RELAY_EXTENDED2
+        response = self.recv_relay()
+        if response is None:
+            self.state = CircuitState.FAILED
+            return False
+
+        if response.relay_command == RelayCommand.EXTENDED2:
+            # Parse EXTENDED2 payload (same as CREATED2: HLEN + HDATA)
+            hdata = parse_extended2_payload(response.data)
+
+            # Complete handshake and derive keys
+            key_material = ntor_state.complete_handshake(hdata)
+
+            if key_material is None:
+                self.state = CircuitState.FAILED
+                return False
+
+            # Store hop with keys
+            keys = CircuitKeys.from_key_material(key_material)
+            hop = CircuitHop(
+                fingerprint=fingerprint,
+                ntor_onion_key=ntor_onion_key,
+                keys=keys,
+            )
+            self.hops.append(hop)
+
+            # Add crypto layer for new hop
+            self._crypto_layers.append(
+                RelayCrypto.create(
+                    key_forward=keys.key_forward,
+                    key_backward=keys.key_backward,
+                    digest_forward=keys.digest_forward,
+                    digest_backward=keys.digest_backward,
+                )
+            )
+
+            return True
+
+        # Extension failed (could be TRUNCATED or other error)
         return False
 
     def destroy(self) -> None:
@@ -200,54 +295,115 @@ class Circuit:
             self._next_stream_id = 1  # Wrap around (0 is reserved for control)
         return stream_id
 
-    def send_relay(self, relay_cell: RelayCell) -> None:
+    def send_relay(self, relay_cell: RelayCell, early: bool = False) -> None:
         """
         Send an encrypted relay cell on this circuit.
 
+        For multi-hop circuits, encrypts with each hop's key in reverse order
+        (last hop first, then middle, then first).
+
         Args:
             relay_cell: RelayCell to send
+            early: If True, send as RELAY_EARLY (required for EXTEND2)
         """
         if not self.is_open:
             raise RuntimeError("Circuit is not open")
-        if self._crypto is None:
+        if not self._crypto_layers:
             raise RuntimeError("Circuit crypto not initialized")
 
-        # Encrypt the relay cell
-        encrypted_payload = self._crypto.encrypt_forward(relay_cell)
+        # Encrypt with the last hop's key first (the exit node),
+        # then each preceding hop. The first hop decrypts first,
+        # passing to middle, which decrypts and passes to exit.
+        #
+        # For the last crypto layer, we use encrypt_forward which
+        # sets the digest. For earlier layers, we just encrypt.
+        last_layer = self._crypto_layers[-1]
+        encrypted_payload = last_layer.encrypt_forward(relay_cell)
 
-        # Wrap in a RELAY cell
+        # Encrypt with remaining layers in reverse order
+        for layer in reversed(self._crypto_layers[:-1]):
+            encrypted_payload = layer.encrypt_raw(encrypted_payload)
+
+        # Wrap in a RELAY or RELAY_EARLY cell
+        command = CellCommand.RELAY_EARLY if early else CellCommand.RELAY
         cell = Cell(
             circ_id=self.circ_id,
-            command=CellCommand.RELAY,
+            command=command,
             payload=encrypted_payload,
         )
         self.connection.send_cell(cell)
 
-    def recv_relay(self) -> RelayCell | None:
+    def recv_relay(self, debug: bool = False) -> RelayCell | None:
         """
         Receive and decrypt a relay cell from this circuit.
+
+        For multi-hop circuits, decrypts with each hop's key in order
+        (first hop first, then middle, then last).
+
+        Args:
+            debug: If True, print debug info
 
         Returns:
             Decrypted RelayCell, or None if decryption failed
         """
         if not self.is_open:
             raise RuntimeError("Circuit is not open")
-        if self._crypto is None:
+        if not self._crypto_layers:
             raise RuntimeError("Circuit crypto not initialized")
 
         # Receive cell
         cell = self.connection.recv_cell()
 
+        if debug:
+            print(f"    [debug] Received cell: cmd={cell.command.name}")
+
         if cell.command == CellCommand.DESTROY:
+            reason = cell.payload[0] if cell.payload else 0
+            reason_names = {
+                0: "NONE",
+                1: "PROTOCOL",
+                2: "INTERNAL",
+                3: "REQUESTED",
+                4: "HIBERNATING",
+                5: "RESOURCELIMIT",
+                6: "CONNECTFAILED",
+                7: "OR_IDENTITY",
+                8: "CHANNEL_CLOSED",
+                9: "FINISHED",
+                10: "TIMEOUT",
+                11: "DESTROYED",
+                12: "NOSUCHSERVICE",
+            }
+            if debug:
+                print(
+                    f"    [debug] DESTROY reason: {reason} ({reason_names.get(reason, 'UNKNOWN')})"
+                )
             self.state = CircuitState.CLOSED
             return None
 
         if cell.command not in (CellCommand.RELAY, CellCommand.RELAY_EARLY):
             # Unexpected cell type
+            if debug:
+                print(f"    [debug] Unexpected cell type: {cell.command.name}")
             return None
 
-        # Decrypt relay cell
-        return self._crypto.decrypt_backward(cell.payload[:RELAY_BODY_LEN])
+        # Decrypt through each layer in order (first hop first)
+        # Each relay on the return path encrypted with its key,
+        # so we decrypt in the same order they encrypted.
+        payload = cell.payload[:RELAY_BODY_LEN]
+
+        for i, layer in enumerate(self._crypto_layers):
+            # For all but the last layer, just decrypt raw
+            if i < len(self._crypto_layers) - 1:
+                payload = layer.decrypt_raw(payload)
+            else:
+                # Last layer - check digest and parse
+                result = layer.decrypt_backward(payload)
+                if debug and result is None:
+                    print("    [debug] decrypt_backward failed (bad recognized or digest)")
+                return result
+
+        return None
 
     def begin_stream(self, address: str, port: int) -> int | None:
         """
@@ -300,13 +456,14 @@ class Circuit:
         )
         self.send_relay(end_cell)
 
-    def send_data(self, stream_id: int, data: bytes) -> None:
+    def send_data(self, stream_id: int, data: bytes, debug: bool = False) -> None:
         """
         Send data on a stream.
 
         Args:
             stream_id: Stream ID
             data: Data to send (will be chunked if necessary)
+            debug: If True, print debug info
         """
         # Send in chunks
         offset = 0
@@ -317,34 +474,51 @@ class Circuit:
                 stream_id=stream_id,
                 data=chunk,
             )
+            if debug:
+                print(f"    [debug] Sending DATA: stream={stream_id} len={len(chunk)}")
             self.send_relay(data_cell)
             offset += RELAY_DATA_LEN
 
-    def recv_data(self, stream_id: int) -> bytes | None:
+    def recv_data(self, stream_id: int, debug: bool = False) -> bytes | None:
         """
         Receive data from a stream.
 
         Args:
             stream_id: Stream ID
+            debug: If True, print debug info
 
         Returns:
             Data bytes, or None if stream ended or error
         """
-        response = self.recv_relay()
+        response = self.recv_relay(debug=debug)
         if response is None:
+            if debug:
+                print("    [debug] recv_relay returned None")
             return None
+
+        if debug:
+            print(
+                f"    [debug] Got relay cmd={response.relay_command.name} "
+                f"stream={response.stream_id} len={len(response.data)}"
+            )
 
         if response.stream_id != stream_id:
             # Data for different stream (shouldn't happen in single-stream use)
+            if debug:
+                print(f"    [debug] Wrong stream_id: got {response.stream_id}, want {stream_id}")
             return None
 
         if response.relay_command == RelayCommand.DATA:
             return response.data
 
         if response.relay_command == RelayCommand.END:
+            if debug:
+                print("    [debug] Stream ended (RELAY_END)")
             return None
 
-        # Unexpected command
+        # Unexpected command - could be SENDME, etc.
+        if debug:
+            print(f"    [debug] Unexpected relay command: {response.relay_command.name}")
         return None
 
     def __enter__(self) -> "Circuit":

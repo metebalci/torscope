@@ -21,13 +21,17 @@ from torscope.onion.circuit import Circuit, CircuitHop, CircuitState
 from torscope.onion.connection import RelayConnection
 from torscope.onion.ntor import CircuitKeys, NtorClientState, node_id_from_fingerprint
 from torscope.onion.relay import (
+    LinkSpecifier,
+    LinkSpecifierType,
     RelayCell,
     RelayCommand,
     RelayCrypto,
     RelayEndReason,
     create_begin_payload,
     create_end_payload,
+    create_extend2_payload,
     parse_connected_payload,
+    parse_extended2_payload,
 )
 
 __all__ = [
@@ -57,7 +61,11 @@ __all__ = [
     "RelayCommand",
     "RelayCrypto",
     "RelayEndReason",
+    "LinkSpecifier",
+    "LinkSpecifierType",
     "create_begin_payload",
     "create_end_payload",
+    "create_extend2_payload",
     "parse_connected_payload",
+    "parse_extended2_payload",
 ]

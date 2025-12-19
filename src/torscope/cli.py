@@ -6,6 +6,7 @@ Provides command-line tools for exploring the Tor network.
 
 import argparse
 import base64
+import random
 import sys
 import traceback
 from collections.abc import Callable
@@ -18,7 +19,7 @@ from torscope.directory.consensus import ConsensusParser
 from torscope.directory.descriptor import ServerDescriptorParser
 from torscope.directory.extra_info import ExtraInfoParser
 from torscope.directory.fallback import get_fallbacks
-from torscope.directory.models import ConsensusDocument
+from torscope.directory.models import ConsensusDocument, RouterStatusEntry
 from torscope.onion.circuit import Circuit
 from torscope.onion.connection import RelayConnection
 
@@ -126,7 +127,7 @@ def cmd_relays(args: argparse.Namespace) -> int:
 def cmd_relay(args: argparse.Namespace) -> int:
     """Show details for a specific relay."""
     try:
-        consensus = get_consensus(args.no_cache)
+        consensus = get_consensus()
 
         # Find relay by fingerprint or nickname
         query = args.query.upper()
@@ -227,7 +228,7 @@ def cmd_relay(args: argparse.Namespace) -> int:
 def cmd_extra_info(args: argparse.Namespace) -> int:
     """Show extra-info statistics for a relay."""
     try:
-        consensus = get_consensus(args.no_cache)
+        consensus = get_consensus()
 
         # Find relay by fingerprint or nickname
         query = args.query.upper()
@@ -331,107 +332,145 @@ def cmd_extra_info(args: argparse.Namespace) -> int:
         return 1
 
 
-def cmd_connect(args: argparse.Namespace) -> int:
-    """Test OR protocol connection to a relay."""
-    try:
-        consensus = get_consensus(args.no_cache)
+def _find_relay(consensus: ConsensusDocument, query: str) -> RouterStatusEntry | None:
+    """Find relay by fingerprint or nickname."""
+    query_upper = query.upper()
+    for r in consensus.routers:
+        if r.fingerprint.startswith(query_upper):
+            return r
+        if r.nickname.upper() == query_upper:
+            return r
+    return None
 
-        # Find relay by fingerprint or nickname
-        query = args.query.upper()
-        relay = None
 
-        for r in consensus.routers:
-            if r.fingerprint.startswith(query):
-                relay = r
-                break
-            if r.nickname.upper() == query:
-                relay = r
-                break
+def _select_random_relay(
+    consensus: ConsensusDocument,
+    role: str,
+    exclude: list[str] | None = None,
+) -> RouterStatusEntry | None:
+    """
+    Select a random relay appropriate for a circuit role.
 
-        if relay is None:
-            print(f"Relay not found: {args.query}", file=sys.stderr)
-            return 1
+    Args:
+        consensus: The consensus document
+        role: One of "guard", "middle", "exit"
+        exclude: List of fingerprints to exclude (avoid same relay twice)
 
-        print(f"\nConnecting to {relay.nickname} ({relay.ip}:{relay.orport})...")
+    Returns:
+        A random relay suitable for the role, or None if none found
+    """
+    exclude_set = set(exclude) if exclude else set()
 
-        conn = RelayConnection(host=relay.ip, port=relay.orport, timeout=args.timeout)
+    if role == "guard":
+        # Guards need Guard, Stable, and Fast flags
+        candidates = [
+            r
+            for r in consensus.routers
+            if r.has_flag("Guard")
+            and r.has_flag("Stable")
+            and r.has_flag("Fast")
+            and r.fingerprint not in exclude_set
+        ]
+    elif role == "exit":
+        # Exits need Exit, Stable, and Fast flags
+        candidates = [
+            r
+            for r in consensus.routers
+            if r.has_flag("Exit")
+            and r.has_flag("Stable")
+            and r.has_flag("Fast")
+            and r.fingerprint not in exclude_set
+        ]
+    else:  # middle
+        # Middle relays need Stable and Fast flags
+        candidates = [
+            r
+            for r in consensus.routers
+            if r.has_flag("Stable") and r.has_flag("Fast") and r.fingerprint not in exclude_set
+        ]
 
-        try:
-            conn.connect()
-            print("  TLS connection established")
+    if not candidates:
+        return None
 
-            if conn.handshake():
-                print(f"  Link protocol version: {conn.link_protocol}")
-                print(f"  Their versions: {conn.their_versions}")
-                cert_count = len(conn.certs.certificates) if conn.certs else 0
-                print(f"  Certificates received: {cert_count}")
-                if conn.auth_challenge:
-                    print(f"  Auth methods: {conn.auth_challenge.methods}")
-                print("\n  Handshake successful!")
-                return 0
+    return random.choice(candidates)
 
-            print("  Handshake failed: no common protocol version", file=sys.stderr)
-            return 1
 
-        except ConnectionError as e:
-            print(f"  Connection error: {e}", file=sys.stderr)
-            return 1
-        finally:
-            conn.close()
+def _get_ntor_key(client: DirectoryClient, fingerprint: str) -> bytes | None:
+    """Fetch and decode ntor-onion-key for a relay."""
+    content, _ = client.fetch_server_descriptors([fingerprint])
+    descriptors = ServerDescriptorParser.parse(content)
+    if not descriptors or not descriptors[0].ntor_onion_key:
+        return None
 
-    # pylint: disable-next=broad-exception-caught
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
+    key_b64 = descriptors[0].ntor_onion_key
+    padding = 4 - len(key_b64) % 4
+    if padding != 4:
+        key_b64 += "=" * padding
+    return base64.b64decode(key_b64)
 
 
 def cmd_circuit(args: argparse.Namespace) -> int:  # pylint: disable=too-many-return-statements
-    """Test circuit creation with a relay."""
+    """Build a circuit (1-3 hops), optionally open a stream and send data."""
     try:
-        consensus = get_consensus(args.no_cache)
-
-        # Find relay by fingerprint or nickname
-        query = args.query.upper()
-        relay = None
-
-        for r in consensus.routers:
-            if r.fingerprint.startswith(query):
-                relay = r
-                break
-            if r.nickname.upper() == query:
-                relay = r
-                break
-
-        if relay is None:
-            print(f"Relay not found: {args.query}", file=sys.stderr)
-            return 1
-
-        # Fetch server descriptor to get ntor-onion-key
+        consensus = get_consensus()
         client = DirectoryClient()
-        print(f"Fetching descriptor for {relay.nickname}...", file=sys.stderr)
-        content, _ = client.fetch_server_descriptors([relay.fingerprint])
-        descriptors = ServerDescriptorParser.parse(content)
 
-        if not descriptors:
-            print(f"No descriptor found for {relay.nickname}", file=sys.stderr)
-            return 1
+        num_hops = args.hops
 
-        desc = descriptors[0]
-        if not desc.ntor_onion_key:
-            print(f"Relay {relay.nickname} has no ntor-onion-key", file=sys.stderr)
-            return 1
+        # Build relay specs based on number of hops
+        exit_spec = vars(args)["exit"]  # 'exit' is a builtin name
+        all_specs = [
+            ("guard", args.guard),
+            ("middle", args.middle),
+            ("exit", exit_spec),
+        ]
+        relay_specs = all_specs[:num_hops]
 
-        # Decode the ntor-onion-key (base64, may need padding)
-        key_b64 = desc.ntor_onion_key
-        # Add padding if necessary
-        padding = 4 - len(key_b64) % 4
-        if padding != 4:
-            key_b64 += "=" * padding
-        ntor_key = base64.b64decode(key_b64)
+        # Resolve relays (None means random selection)
+        relays = []
+        used_fingerprints: list[str] = []
 
-        print(f"\nCreating circuit to {relay.nickname} ({relay.ip}:{relay.orport})...")
+        for role, query in relay_specs:
+            if query is None:
+                # Random selection based on role
+                relay = _select_random_relay(consensus, role, used_fingerprints)
+                if relay is None:
+                    print(f"No suitable {role} relay found", file=sys.stderr)
+                    return 1
+            else:
+                relay = _find_relay(consensus, query.strip())
+                if relay is None:
+                    print(f"Relay not found: {query}", file=sys.stderr)
+                    return 1
+            relays.append(relay)
+            used_fingerprints.append(relay.fingerprint)
 
-        conn = RelayConnection(host=relay.ip, port=relay.orport, timeout=args.timeout)
+        # Check if stream requested
+        has_stream = args.target is not None and args.port is not None
+
+        # Warn if exit doesn't have Exit flag (only for 3-hop with stream)
+        if has_stream and num_hops == 3 and "Exit" not in relays[2].flags:
+            print(f"Warning: {relays[2].nickname} does not have Exit flag", file=sys.stderr)
+
+        print(f"\nBuilding {num_hops}-hop circuit:")
+        roles = ["Guard", "Middle", "Exit"]
+        for i, r in enumerate(relays):
+            print(f"  [{i+1}] {roles[i]}: {r.nickname} ({r.ip}:{r.orport})")
+
+        # Fetch descriptors for all relays
+        print("\nFetching relay descriptors...", file=sys.stderr)
+        ntor_keys = []
+        for relay in relays:
+            ntor_key = _get_ntor_key(client, relay.fingerprint)
+            if ntor_key is None:
+                print(f"No ntor-onion-key for {relay.nickname}", file=sys.stderr)
+                return 1
+            ntor_keys.append(ntor_key)
+
+        # Connect to first relay
+        first_relay = relays[0]
+        print(f"\nConnecting to {first_relay.nickname}...")
+        conn = RelayConnection(host=first_relay.ip, port=first_relay.orport, timeout=args.timeout)
 
         try:
             conn.connect()
@@ -442,164 +481,84 @@ def cmd_circuit(args: argparse.Namespace) -> int:  # pylint: disable=too-many-re
                 return 1
             print(f"  Link protocol: v{conn.link_protocol}")
 
-            # Create circuit
+            # Create circuit and extend through all hops
             circuit = Circuit.create(conn)
             print(f"  Circuit ID: {circuit.circ_id:#010x}")
 
-            # Extend to relay
-            if circuit.extend_to(relay.fingerprint, ntor_key):
-                print("  ntor handshake successful!")
-                print(f"  Circuit state: {circuit.state.name}")
-
-                # Show derived keys (first 8 bytes of each for brevity)
-                if circuit.hops and circuit.hops[0].keys:
-                    keys = circuit.hops[0].keys
-                    print("\n  Derived keys:")
-                    print(f"    Kf: {keys.key_forward.hex()[:16]}...")
-                    print(f"    Kb: {keys.key_backward.hex()[:16]}...")
-
-                print("\n  Circuit created successfully!")
-
-                # Clean up
-                circuit.destroy()
-                print("  Circuit destroyed")
-                return 0
-
-            print("  Circuit creation failed", file=sys.stderr)
-            return 1
-
-        except ConnectionError as e:
-            print(f"  Connection error: {e}", file=sys.stderr)
-            return 1
-        finally:
-            conn.close()
-
-    # pylint: disable-next=broad-exception-caught
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        traceback.print_exc()
-        return 1
-
-
-def cmd_stream(args: argparse.Namespace) -> int:  # pylint: disable=too-many-return-statements
-    """Test opening a stream through a circuit."""
-    try:
-        consensus = get_consensus(args.no_cache)
-
-        # Find relay by fingerprint or nickname
-        query = args.relay.upper()
-        relay = None
-
-        for r in consensus.routers:
-            if r.fingerprint.startswith(query):
-                relay = r
-                break
-            if r.nickname.upper() == query:
-                relay = r
-                break
-
-        if relay is None:
-            print(f"Relay not found: {args.relay}", file=sys.stderr)
-            return 1
-
-        # Check if relay has Exit flag
-        if "Exit" not in relay.flags:
-            print(f"Warning: {relay.nickname} does not have Exit flag", file=sys.stderr)
-
-        # Fetch server descriptor to get ntor-onion-key
-        client = DirectoryClient()
-        print(f"Fetching descriptor for {relay.nickname}...", file=sys.stderr)
-        content, _ = client.fetch_server_descriptors([relay.fingerprint])
-        descriptors = ServerDescriptorParser.parse(content)
-
-        if not descriptors:
-            print(f"No descriptor found for {relay.nickname}", file=sys.stderr)
-            return 1
-
-        desc = descriptors[0]
-        if not desc.ntor_onion_key:
-            print(f"Relay {relay.nickname} has no ntor-onion-key", file=sys.stderr)
-            return 1
-
-        # Decode the ntor-onion-key (base64, may need padding)
-        key_b64 = desc.ntor_onion_key
-        padding = 4 - len(key_b64) % 4
-        if padding != 4:
-            key_b64 += "=" * padding
-        ntor_key = base64.b64decode(key_b64)
-
-        # Parse target
-        target_host = args.target
-        target_port = args.port
-
-        print(f"\nCreating circuit to {relay.nickname} ({relay.ip}:{relay.orport})...")
-
-        conn = RelayConnection(host=relay.ip, port=relay.orport, timeout=args.timeout)
-
-        try:
-            conn.connect()
-            print("  TLS connection established")
-
-            if not conn.handshake():
-                print("  Link handshake failed", file=sys.stderr)
-                return 1
-            print(f"  Link protocol: v{conn.link_protocol}")
-
-            # Create circuit
-            circuit = Circuit.create(conn)
-            print(f"  Circuit ID: {circuit.circ_id:#010x}")
-
-            # Extend to relay
-            if not circuit.extend_to(relay.fingerprint, ntor_key):
-                print("  Circuit creation failed", file=sys.stderr)
-                return 1
-
-            print("  ntor handshake successful!")
-
-            # Open stream
-            print(f"\nOpening stream to {target_host}:{target_port}...")
-            stream_id = circuit.begin_stream(target_host, target_port)
-
-            if stream_id is None:
-                print("  Stream rejected by relay", file=sys.stderr)
-                circuit.destroy()
-                return 1
-
-            print(f"  Stream opened! (stream_id={stream_id})")
-            print("  RELAY_CONNECTED received")
-
-            # Send HTTP request if target is port 80 or 443
-            if target_port == 80:
-                request = f"GET / HTTP/1.0\r\nHost: {target_host}\r\n\r\n"
-                print("\nSending HTTP request...")
-                circuit.send_data(stream_id, request.encode("ascii"))
-
-                # Receive response (first chunk)
-                print("Waiting for response...")
-                response_data = b""
-                for _ in range(5):  # Read up to 5 data cells
-                    data = circuit.recv_data(stream_id)
-                    if data is None:
-                        break
-                    response_data += data
-
-                if response_data:
-                    # Show first 500 bytes of response
-                    response_text = response_data[:500].decode("utf-8", errors="replace")
-                    print(f"\nResponse ({len(response_data)} bytes):")
-                    print("-" * 40)
-                    print(response_text)
-                    if len(response_data) > 500:
-                        print("...")
-                    print("-" * 40)
+            for i, (relay, ntor_key) in enumerate(zip(relays, ntor_keys, strict=True)):
+                if i == 0:
+                    # First hop - use CREATE2
+                    print(f"\n  Hop {i+1}: Creating circuit to {relay.nickname}...")
+                    if not circuit.extend_to(relay.fingerprint, ntor_key):
+                        print("    CREATE2 failed", file=sys.stderr)
+                        return 1
+                    print("    CREATE2/CREATED2 successful")
                 else:
-                    print("No data received")
+                    # Subsequent hops - use RELAY_EXTEND2
+                    print(f"\n  Hop {i+1}: Extending to {relay.nickname}...")
+                    if not circuit.extend_to(
+                        relay.fingerprint, ntor_key, ip=relay.ip, port=relay.orport
+                    ):
+                        print("    EXTEND2 failed", file=sys.stderr)
+                        return 1
+                    print("    RELAY_EXTEND2/EXTENDED2 successful")
 
-            print("\nStream test successful!")
+            print(f"\n  Circuit built with {len(circuit.hops)} hops!")
+
+            # Show all hops
+            print("\n  Hops:")
+            for i, hop in enumerate(circuit.hops):
+                if hop.keys:
+                    kf = hop.keys.key_forward.hex()[:8]
+                    print(f"    [{i+1}] {hop.fingerprint[:16]}... Kf={kf}...")
+
+            # Open stream if target specified
+            if has_stream:
+                print(f"\n  Opening stream to {args.target}:{args.port}...")
+                stream_id = circuit.begin_stream(args.target, args.port)
+
+                if stream_id is None:
+                    print("    Stream rejected by exit relay", file=sys.stderr)
+                    circuit.destroy()
+                    return 1
+
+                print(f"    Stream opened (stream_id={stream_id})")
+
+                # Send data if provided
+                if args.data:
+                    # Decode escape sequences like \r\n
+                    request_data = args.data.encode("utf-8").decode("unicode_escape")
+                    print(f"\n  Sending {len(request_data)} bytes...")
+                    circuit.send_data(stream_id, request_data.encode("ascii"))
+
+                    # Receive response
+                    print("  Waiting for response...")
+                    response_data = b""
+                    debug = getattr(args, "debug", False)
+                    for _ in range(10):  # Read up to 10 data cells
+                        data = circuit.recv_data(stream_id, debug=debug)
+                        if data is None:
+                            break
+                        response_data += data
+
+                    if response_data:
+                        print(f"\n  Response ({len(response_data)} bytes):")
+                        print("  " + "-" * 50)
+                        # Show response (limit to 1000 chars)
+                        response_text = response_data[:1000].decode("utf-8", errors="replace")
+                        for line in response_text.split("\n"):
+                            print(f"  {line}")
+                        if len(response_data) > 1000:
+                            print("  ...")
+                        print("  " + "-" * 50)
+                    else:
+                        print("  No response data received")
+
+                print("\n  Stream test successful!")
 
             # Clean up
             circuit.destroy()
-            print("Circuit destroyed")
+            print("\n  Circuit destroyed")
             return 0
 
         except ConnectionError as e:
@@ -672,7 +631,6 @@ def main() -> int:
     relay_parser.add_argument(
         "query", metavar="nickname|fingerprint", help="Relay nickname or fingerprint (partial ok)"
     )
-    relay_parser.add_argument("--no-cache", action="store_true", help="Bypass cache, fetch fresh")
 
     # extra-info command
     extra_info_parser = subparsers.add_parser(
@@ -681,45 +639,26 @@ def main() -> int:
     extra_info_parser.add_argument(
         "query", metavar="nickname|fingerprint", help="Relay nickname or fingerprint"
     )
-    extra_info_parser.add_argument(
-        "--no-cache", action="store_true", help="Bypass cache, fetch fresh"
-    )
-
-    # connect command
-    connect_parser = subparsers.add_parser("connect", help="Test OR protocol connection to a relay")
-    connect_parser.add_argument(
-        "query", metavar="nickname|fingerprint", help="Relay nickname or fingerprint"
-    )
-    connect_parser.add_argument("--no-cache", action="store_true", help="Bypass cache, fetch fresh")
-    connect_parser.add_argument(
-        "--timeout", type=float, default=30.0, help="Connection timeout (default: 30s)"
-    )
 
     # circuit command
     circuit_parser = subparsers.add_parser(
-        "circuit", help="Test circuit creation (ntor handshake) with a relay"
+        "circuit", help="Build a Tor circuit (1-3 hops), optionally open stream"
     )
     circuit_parser.add_argument(
-        "query", metavar="nickname|fingerprint", help="Relay nickname or fingerprint"
+        "--hops", type=int, choices=[1, 2, 3], default=3, help="Number of hops (default: 3)"
     )
-    circuit_parser.add_argument("--no-cache", action="store_true", help="Bypass cache, fetch fresh")
+    circuit_parser.add_argument("--guard", metavar="RELAY", help="Guard relay (default: random)")
+    circuit_parser.add_argument("--middle", metavar="RELAY", help="Middle relay (default: random)")
+    circuit_parser.add_argument("--exit", metavar="RELAY", help="Exit relay (default: random)")
+    circuit_parser.add_argument("--target", metavar="HOST", help="Target hostname to connect to")
+    circuit_parser.add_argument("--port", type=int, metavar="PORT", help="Target port")
+    circuit_parser.add_argument(
+        "--data", metavar="DATA", help="ASCII data to send (use \\r\\n for line breaks)"
+    )
     circuit_parser.add_argument(
         "--timeout", type=float, default=30.0, help="Connection timeout (default: 30s)"
     )
-
-    # stream command
-    stream_parser = subparsers.add_parser(
-        "stream", help="Test opening a stream through a relay (RELAY_BEGIN)"
-    )
-    stream_parser.add_argument(
-        "relay", metavar="nickname|fingerprint", help="Relay nickname or fingerprint (must be Exit)"
-    )
-    stream_parser.add_argument("target", help="Target hostname or IP")
-    stream_parser.add_argument("port", type=int, help="Target port")
-    stream_parser.add_argument("--no-cache", action="store_true", help="Bypass cache, fetch fresh")
-    stream_parser.add_argument(
-        "--timeout", type=float, default=30.0, help="Connection timeout (default: 30s)"
-    )
+    circuit_parser.add_argument("--debug", action="store_true", help="Enable debug output")
 
     args = parser.parse_args()
 
@@ -735,9 +674,7 @@ def main() -> int:
         "relays": cmd_relays,
         "relay": cmd_relay,
         "extra-info": cmd_extra_info,
-        "connect": cmd_connect,
         "circuit": cmd_circuit,
-        "stream": cmd_stream,
     }
 
     try:
