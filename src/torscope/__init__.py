@@ -5,4 +5,4 @@ Provides a CLI for fetching and analyzing Tor network directory information,
 including consensus documents, relay details, and network statistics.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
