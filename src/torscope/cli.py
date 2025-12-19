@@ -200,7 +200,6 @@ def main() -> int:
         prog="torscope",
         description="Tor Network Information Tool",
     )
-    parser.add_argument("-V", "--version", action="version", version=f"torscope {__version__}")
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 

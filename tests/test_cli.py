@@ -45,19 +45,6 @@ def test_main_no_command() -> None:
     assert "usage:" in output.lower() or "torscope" in output
 
 
-def test_main_version_flag() -> None:
-    """Test that -V flag prints version."""
-    with patch("sys.argv", ["torscope", "-V"]):
-        with patch("sys.stdout", new=StringIO()) as fake_out:
-            try:
-                main()
-            except SystemExit as e:
-                assert e.code == 0
-            output = fake_out.getvalue()
-
-    assert __version__ in output
-
-
 def test_main_version_command() -> None:
     """Test that version subcommand works."""
     with patch("sys.argv", ["torscope", "version"]):
