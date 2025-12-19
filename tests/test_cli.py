@@ -1,59 +1,80 @@
 """Tests for the CLI module."""
 
+import argparse
 from io import StringIO
 from unittest.mock import patch
 
 from torscope import __version__
-from torscope.cli import TorscopeREPL
+from torscope.cli import cmd_authorities, cmd_version, main
 
 
 def test_version_command() -> None:
     """Test the version command outputs correct version."""
-    repl = TorscopeREPL()
+    args = argparse.Namespace()
 
     with patch("sys.stdout", new=StringIO()) as fake_out:
-        repl.do_version("")
+        result = cmd_version(args)
         output = fake_out.getvalue()
 
+    assert result == 0
     assert output.strip() == __version__
 
 
-def test_exit_command() -> None:
-    """Test the exit command returns True to stop the loop."""
-    repl = TorscopeREPL()
-
-    with patch("sys.stdout", new=StringIO()):
-        result = repl.do_exit("")
-
-    assert result is True
-
-
-def test_quit_command() -> None:
-    """Test the quit command (alias for exit) returns True."""
-    repl = TorscopeREPL()
-
-    with patch("sys.stdout", new=StringIO()):
-        result = repl.do_quit("")
-
-    assert result is True
-
-
-def test_empty_line() -> None:
-    """Test that empty line doesn't repeat last command."""
-    repl = TorscopeREPL()
-    result = repl.emptyline()
-
-    # Returns False to indicate "don't exit the REPL"
-    assert result is False
-
-
-def test_unknown_command() -> None:
-    """Test that unknown commands show helpful message."""
-    repl = TorscopeREPL()
+def test_authorities_command() -> None:
+    """Test the authorities command lists all authorities."""
+    args = argparse.Namespace()
 
     with patch("sys.stdout", new=StringIO()) as fake_out:
-        repl.default("unknowncommand")
+        result = cmd_authorities(args)
         output = fake_out.getvalue()
 
-    assert "Unknown command" in output
-    assert "help" in output
+    assert result == 0
+    assert "Directory Authorities" in output
+    assert "moria1" in output
+    assert "tor26" in output
+
+
+def test_main_no_command() -> None:
+    """Test that main with no command prints help."""
+    with patch("sys.argv", ["torscope"]):
+        with patch("sys.stdout", new=StringIO()) as fake_out:
+            result = main()
+            output = fake_out.getvalue()
+
+    assert result == 0
+    assert "usage:" in output.lower() or "torscope" in output
+
+
+def test_main_version_flag() -> None:
+    """Test that -V flag prints version."""
+    with patch("sys.argv", ["torscope", "-V"]):
+        with patch("sys.stdout", new=StringIO()) as fake_out:
+            try:
+                main()
+            except SystemExit as e:
+                assert e.code == 0
+            output = fake_out.getvalue()
+
+    assert __version__ in output
+
+
+def test_main_version_command() -> None:
+    """Test that version subcommand works."""
+    with patch("sys.argv", ["torscope", "version"]):
+        with patch("sys.stdout", new=StringIO()) as fake_out:
+            result = main()
+            output = fake_out.getvalue()
+
+    assert result == 0
+    assert output.strip() == __version__
+
+
+def test_main_authorities_command() -> None:
+    """Test that authorities subcommand works."""
+    with patch("sys.argv", ["torscope", "authorities"]):
+        with patch("sys.stdout", new=StringIO()) as fake_out:
+            result = main()
+            output = fake_out.getvalue()
+
+    assert result == 0
+    assert "moria1" in output
