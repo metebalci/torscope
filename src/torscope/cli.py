@@ -13,7 +13,8 @@ from torscope import __version__
 from torscope.directory.authority import DIRECTORY_AUTHORITIES, get_authority_by_nickname
 from torscope.directory.client import DirectoryClient
 from torscope.directory.consensus import ConsensusParser
-from torscope.directory.models import ConsensusDocument
+from torscope.directory.microdescriptor import MicrodescriptorParser
+from torscope.directory.models import ConsensusDocument, Microdescriptor
 
 
 class TorscopeREPL(cmd.Cmd):
@@ -30,6 +31,7 @@ class TorscopeREPL(cmd.Cmd):
         super().__init__()
         self.client = DirectoryClient()
         self.cached_consensus: Optional[ConsensusDocument] = None
+        self.cached_microdescriptors: dict[str, Microdescriptor] = {}  # digest -> md
 
     # pylint: disable-next=unused-argument
     def do_version(self, arg: str) -> None:
@@ -180,6 +182,89 @@ class TorscopeREPL(cmd.Cmd):
 
             print(f"{nickname:<20} {fp:<10} {address:<22} {bandwidth:<12} {flags}")
 
+    def do_fetch_microdescriptors(self, arg: str) -> None:
+        """Fetch microdescriptors for relays from cached consensus.
+
+        Usage: fetch-microdescriptors [--limit <n>] [--flags <flag1,flag2>]
+
+        Fetches microdescriptors for relays matching the specified criteria.
+        Requires a cached consensus (run 'fetch-consensus' first).
+        """
+        if self.cached_consensus is None:
+            print("Error: No consensus cached. Run 'fetch-consensus' first.")
+            return
+
+        # pylint: disable-next=import-outside-toplevel
+        import shlex
+
+        try:
+            args = shlex.split(arg)
+        except ValueError:
+            args = arg.split()
+
+        # Parse arguments
+        limit = 10
+        filter_flags: list[str] = []
+
+        i = 0
+        while i < len(args):
+            if args[i] == "--limit" and i + 1 < len(args):
+                limit = int(args[i + 1])
+                i += 2
+            elif args[i] == "--flags" and i + 1 < len(args):
+                filter_flags = [f.strip() for f in args[i + 1].split(",")]
+                i += 2
+            else:
+                i += 1
+
+        # Filter relays
+        relays = self.cached_consensus.routers
+        if filter_flags:
+            relays = [r for r in relays if all(r.has_flag(flag) for flag in filter_flags)]
+
+        # Limit to relays with microdescriptor hashes
+        relays = [r for r in relays if r.microdesc_hash][:limit]
+
+        if not relays:
+            print("No relays with microdescriptor hashes found.")
+            return
+
+        # Collect hashes
+        hashes = [r.microdesc_hash for r in relays if r.microdesc_hash]
+
+        try:
+            print(f"Fetching {len(hashes)} microdescriptors...")
+            content, used_authority = self.client.fetch_microdescriptors(hashes)
+            print(f"✓ Downloaded {len(content):,} bytes from {used_authority.nickname}")
+
+            # Parse microdescriptors
+            print("Parsing microdescriptors...")
+            microdescriptors = MicrodescriptorParser.parse(content)
+            print(f"✓ Parsed {len(microdescriptors)} microdescriptors\n")
+
+            # Cache and display
+            for md in microdescriptors:
+                self.cached_microdescriptors[md.digest] = md
+
+            # Display summary
+            print(f"{'#':<4} {'ntor-key':<20} {'Exit Policy':<20} {'Family':<10}")
+            print("-" * 60)
+
+            for idx, md in enumerate(microdescriptors[:20], 1):
+                ntor_key = md.onion_key_ntor[:17] + "..." if md.onion_key_ntor else "none"
+                policy = md.exit_policy_v4[:17] + "..." if md.exit_policy_v4 else "none"
+                family = str(len(md.family_members)) if md.family_members else "0"
+                print(f"{idx:<4} {ntor_key:<20} {policy:<20} {family:<10}")
+
+            if len(microdescriptors) > 20:
+                print(f"\n... and {len(microdescriptors) - 20} more")
+
+            print(f"\n{len(microdescriptors)} microdescriptors cached in memory.")
+
+        # pylint: disable-next=broad-exception-caught
+        except Exception as e:
+            print(f"Error fetching microdescriptors: {e}")
+
     # pylint: disable-next=unused-argument
     def do_exit(self, arg: str) -> bool:
         """Exit the REPL.
@@ -248,6 +333,7 @@ class TorscopeREPL(cmd.Cmd):
         commands = [
             ("authorities", "List all directory authorities"),
             ("fetch-consensus", "Fetch network consensus document"),
+            ("fetch-microdescriptors", "Fetch microdescriptors for relays"),
             ("list-relays", "List relays from cached consensus"),
             ("version", "Display the torscope version"),
             ("help", "Show this help message"),

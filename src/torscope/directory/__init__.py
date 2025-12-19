@@ -9,6 +9,7 @@ from torscope.directory.authority import (
 from torscope.directory.certificates import KeyCertificateParser
 from torscope.directory.client import DirectoryClient
 from torscope.directory.consensus import ConsensusParser
+from torscope.directory.microdescriptor import MicrodescriptorParser
 from torscope.directory.models import (
     AuthorityEntry,
     ConsensusDocument,
@@ -26,6 +27,7 @@ __all__ = [
     "KeyCertificateParser",
     "DirectoryClient",
     "ConsensusParser",
+    "MicrodescriptorParser",
     "AuthorityEntry",
     "ConsensusDocument",
     "DirectorySignature",

@@ -590,10 +590,10 @@ class TestMicrodescriptor:
         assert md.onion_key_rsa is None
         assert md.onion_key_ntor is None
         assert md.ed25519_identity is None
+        assert md.rsa1024_identity is None
         assert md.ipv6_addresses == []
         assert md.exit_policy_v4 is None
         assert md.exit_policy_v6 is None
-        assert md.protocols is None
         assert md.family_members == []
         assert md.family_ids == []
         assert md.raw_descriptor == ""

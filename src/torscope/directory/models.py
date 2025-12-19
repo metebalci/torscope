@@ -233,7 +233,8 @@ class Microdescriptor:
     # Keys
     onion_key_rsa: Optional[str] = None  # PEM format (TAP, legacy)
     onion_key_ntor: Optional[str] = None  # base64-encoded curve25519
-    ed25519_identity: Optional[str] = None  # base64
+    ed25519_identity: Optional[str] = None  # base64 (id ed25519)
+    rsa1024_identity: Optional[str] = None  # base64 (id rsa1024)
 
     # Network
     ipv6_addresses: list[str] = field(default_factory=list)
@@ -241,9 +242,6 @@ class Microdescriptor:
     # Exit policy
     exit_policy_v4: Optional[str] = None  # "accept" or "reject" + portlist
     exit_policy_v6: Optional[str] = None
-
-    # Protocols
-    protocols: Optional[dict[str, list[int]]] = None
 
     # Family
     family_members: list[str] = field(default_factory=list)
