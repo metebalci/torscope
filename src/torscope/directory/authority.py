@@ -119,3 +119,13 @@ def get_random_authority() -> DirectoryAuthority:
     import random
 
     return random.choice(DIRECTORY_AUTHORITIES)
+
+
+def get_shuffled_authorities() -> list[DirectoryAuthority]:
+    """Get all directory authorities in random order."""
+    # pylint: disable-next=import-outside-toplevel
+    import random
+
+    authorities = list(DIRECTORY_AUTHORITIES)
+    random.shuffle(authorities)
+    return authorities

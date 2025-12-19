@@ -9,7 +9,11 @@ from typing import Optional
 
 import httpx
 
-from torscope.directory.authority import DirectoryAuthority, get_random_authority
+from torscope.directory.authority import (
+    DirectoryAuthority,
+    get_random_authority,
+    get_shuffled_authorities,
+)
 
 
 class DirectoryClient:
@@ -32,19 +36,42 @@ class DirectoryClient:
         """
         Fetch consensus document from a directory authority.
 
+        If no authority is specified, tries multiple authorities until one succeeds.
+
         Args:
-            authority: Directory authority to fetch from (random if None)
+            authority: Directory authority to fetch from (tries multiple if None)
             consensus_type: Type of consensus ("microdesc" or "full")
 
         Returns:
             Tuple of (consensus_bytes, authority_used)
 
         Raises:
-            httpx.HTTPError: If fetch fails
+            httpx.HTTPError: If all authorities fail
         """
-        if authority is None:
-            authority = get_random_authority()
+        # If specific authority requested, try only that one
+        if authority is not None:
+            return self._fetch_consensus_from(authority, consensus_type)
 
+        # Try multiple authorities until one succeeds
+        authorities = get_shuffled_authorities()
+        last_error: Exception | None = None
+
+        for auth in authorities:
+            try:
+                return self._fetch_consensus_from(auth, consensus_type)
+            except httpx.HTTPError as e:
+                last_error = e
+                continue
+
+        # All authorities failed
+        raise last_error or httpx.HTTPError("All authorities unreachable")
+
+    def _fetch_consensus_from(
+        self,
+        authority: DirectoryAuthority,
+        consensus_type: str,
+    ) -> tuple[bytes, DirectoryAuthority]:
+        """Fetch consensus from a specific authority."""
         # Determine URL based on consensus type
         if consensus_type == "microdesc":
             url = f"{authority.http_url}/tor/status-vote/current/consensus-microdesc"
@@ -122,6 +149,59 @@ class DirectoryClient:
         # Join fingerprints with '+'
         fp_string = "+".join(fingerprints)
         url = f"{authority.http_url}/tor/server/fp/{fp_string}"
+
+        headers = {
+            "Accept-Encoding": "deflate, gzip",
+            "User-Agent": "torscope/0.1.0",
+        }
+
+        with httpx.Client(timeout=self.timeout) as client:
+            response = client.get(url, headers=headers, follow_redirects=True)
+            response.raise_for_status()
+            return response.content, authority
+
+    def fetch_key_certificates(
+        self,
+        authority: Optional[DirectoryAuthority] = None,
+    ) -> tuple[bytes, DirectoryAuthority]:
+        """
+        Fetch all authority key certificates.
+
+        If no authority is specified, tries multiple authorities until one succeeds.
+
+        Args:
+            authority: Directory authority to fetch from (tries multiple if None)
+
+        Returns:
+            Tuple of (certificates_bytes, authority_used)
+
+        Raises:
+            httpx.HTTPError: If all authorities fail
+        """
+        # If specific authority requested, try only that one
+        if authority is not None:
+            return self._fetch_key_certificates_from(authority)
+
+        # Try multiple authorities until one succeeds
+        authorities = get_shuffled_authorities()
+        last_error: Exception | None = None
+
+        for auth in authorities:
+            try:
+                return self._fetch_key_certificates_from(auth)
+            except httpx.HTTPError as e:
+                last_error = e
+                continue
+
+        # All authorities failed
+        raise last_error or httpx.HTTPError("All authorities unreachable")
+
+    def _fetch_key_certificates_from(
+        self,
+        authority: DirectoryAuthority,
+    ) -> tuple[bytes, DirectoryAuthority]:
+        """Fetch key certificates from a specific authority."""
+        url = f"{authority.http_url}/tor/keys/all"
 
         headers = {
             "Accept-Encoding": "deflate, gzip",

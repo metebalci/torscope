@@ -163,6 +163,65 @@ class ConsensusDocument:
         """Get all relays with a specific flag."""
         return [r for r in self.routers if r.has_flag(flag)]
 
+    def verify_signatures(self, certificates: list["KeyCertificate"]) -> int:
+        """
+        Verify consensus signatures against authority key certificates.
+
+        Args:
+            certificates: List of authority key certificates
+
+        Returns:
+            Number of successfully verified signatures
+        """
+        # pylint: disable-next=import-outside-toplevel
+        from torscope.crypto import extract_signed_portion, verify_consensus_signature
+
+        # Build a map of signing key fingerprint -> certificate
+        cert_map: dict[str, "KeyCertificate"] = {}
+        for key_cert in certificates:
+            try:
+                signing_fp = key_cert.signing_key_fingerprint
+                cert_map[signing_fp] = key_cert
+            # pylint: disable-next=broad-exception-caught
+            except Exception:
+                continue
+
+        verified_count = 0
+
+        for sig in self.signatures:
+            # Find the certificate for this signature
+            signing_key_digest = sig.signing_key_digest.upper()
+            matching_cert = cert_map.get(signing_key_digest)
+
+            if matching_cert is None:
+                sig.verified = False
+                continue
+
+            # Extract the signed portion for this signature
+            signed_data = extract_signed_portion(
+                self.raw_document,
+                sig.identity,
+                sig.algorithm,
+            )
+
+            if signed_data is None:
+                sig.verified = False
+                continue
+
+            # Verify the signature
+            is_valid = verify_consensus_signature(
+                matching_cert.signing_key,
+                sig.signature,
+                signed_data,
+                sig.algorithm,
+            )
+
+            sig.verified = is_valid
+            if is_valid:
+                verified_count += 1
+
+        return verified_count
+
 
 @dataclass
 class Microdescriptor:
@@ -198,3 +257,42 @@ class Microdescriptor:
     def is_exit(self) -> bool:
         """Check if this relay allows exits."""
         return self.exit_policy_v4 is not None and self.exit_policy_v4.startswith("accept")
+
+
+@dataclass
+class KeyCertificate:
+    """Represents an authority key certificate.
+
+    Authority key certificates bind a long-term identity key to a
+    medium-term signing key used for signing consensus documents.
+    """
+
+    # Protocol version (must be 3)
+    version: int
+
+    # Authority fingerprint (SHA1 of identity key, uppercase hex)
+    fingerprint: str
+
+    # Validity period
+    published: datetime
+    expires: datetime
+
+    # RSA public keys (PEM format including headers)
+    identity_key: str  # Long-term authority identity key
+    signing_key: str  # Medium-term signing key
+
+    # Optional fields
+    address: Optional[str] = None  # IP:port of directory service
+    dir_key_crosscert: Optional[str] = None  # Cross-certification signature
+    dir_key_certification: Optional[str] = None  # Final signature by identity key
+
+    # Raw certificate
+    raw_certificate: str = ""
+
+    @property
+    def signing_key_fingerprint(self) -> str:
+        """Get SHA1 fingerprint of signing key (uppercase hex)."""
+        # pylint: disable-next=import-outside-toplevel
+        from torscope.crypto import compute_rsa_key_fingerprint
+
+        return compute_rsa_key_fingerprint(self.signing_key)

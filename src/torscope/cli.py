@@ -113,7 +113,7 @@ class TorscopeREPL(cmd.Cmd):
             if consensus.params:
                 print(f"  Network Parameters: {len(consensus.params)} parameters set")
 
-            print("\nConsensus cached in memory. Use 'list_relays' to view relays.")
+            print("\nConsensus cached in memory. Use 'list-relays' to view relays.")
 
         # pylint: disable-next=broad-exception-caught
         except Exception as e:
@@ -205,6 +205,57 @@ class TorscopeREPL(cmd.Cmd):
     def emptyline(self) -> bool:
         """Do nothing on empty line (override default repeat behavior)."""
         return False
+
+    def precmd(self, line: str) -> str:
+        """Convert dashes to underscores in command names."""
+        if line:
+            parts = line.split(maxsplit=1)
+            if parts:
+                # Convert dashes to underscores in the command name only
+                parts[0] = parts[0].replace("-", "_")
+                return " ".join(parts)
+        return line
+
+    def completenames(self, text: str, *ignored: str) -> list[str]:
+        """Complete command names with dashes instead of underscores."""
+        # Get all do_* methods
+        dotext = "do_" + text.replace("-", "_")
+        completions = [
+            name[3:].replace("_", "-") for name in self.get_names() if name.startswith(dotext)
+        ]
+        # Filter out internal commands
+        return [c for c in completions if c not in ("EOF",)]
+
+    def do_help(self, arg: str) -> None:
+        """Show available commands or help for a specific command.
+
+        Usage: help [command]
+        """
+        if arg:
+            # Show help for specific command (convert dashes to underscores)
+            arg = arg.replace("-", "_")
+            func = getattr(self, f"do_{arg}", None)
+            if func and func.__doc__:
+                # Show command with dashes in output
+                cmd_name = arg.replace("_", "-")
+                print(f"\n{cmd_name}: {func.__doc__}\n")
+            else:
+                print(f"Unknown command: {arg.replace('_', '-')}")
+            return
+
+        # List all commands with short descriptions
+        print("\nAvailable commands:\n")
+        commands = [
+            ("authorities", "List all directory authorities"),
+            ("fetch-consensus", "Fetch network consensus document"),
+            ("list-relays", "List relays from cached consensus"),
+            ("version", "Display the torscope version"),
+            ("help", "Show this help message"),
+            ("exit", "Exit the REPL"),
+        ]
+        for name, desc in commands:
+            print(f"  {name:<18} {desc}")
+        print("\nType 'help <command>' for more details on a specific command.")
 
     def default(self, line: str) -> None:
         """Handle unknown commands."""

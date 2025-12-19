@@ -100,21 +100,28 @@ class TestFetchConsensus:
         call_args = mock_client_instance.get.call_args
         assert call_args[0][0] == expected_url
 
-    @patch("torscope.directory.client.get_random_authority")
+    @patch("torscope.directory.client.get_shuffled_authorities")
     @patch("httpx.Client")
-    def test_fetch_consensus_random_authority(
-        self, mock_client_class, mock_get_random_authority
+    def test_fetch_consensus_tries_multiple_authorities(
+        self, mock_client_class, mock_get_shuffled_authorities
     ):
-        """Test fetching consensus from random authority when none specified."""
-        # Setup mock authority
-        random_authority = DirectoryAuthority(
+        """Test fetching consensus tries authorities until one succeeds."""
+        # Setup mock authorities
+        authority1 = DirectoryAuthority(
             nickname="tor26",
             ip="86.59.21.38",
             dirport=80,
             orport=443,
             v3ident="ABC123",
         )
-        mock_get_random_authority.return_value = random_authority
+        authority2 = DirectoryAuthority(
+            nickname="moria1",
+            ip="128.31.0.34",
+            dirport=9131,
+            orport=9101,
+            v3ident="DEF456",
+        )
+        mock_get_shuffled_authorities.return_value = [authority1, authority2]
 
         # Setup mock HTTP response
         mock_response = MagicMock()
@@ -130,9 +137,53 @@ class TestFetchConsensus:
         client = DirectoryClient()
         content, used_authority = client.fetch_consensus()
 
-        # Verify random authority was used
-        assert used_authority == random_authority
-        mock_get_random_authority.assert_called_once()
+        # Verify first authority was used (since it succeeded)
+        assert used_authority == authority1
+        mock_get_shuffled_authorities.assert_called_once()
+
+    @patch("torscope.directory.client.get_shuffled_authorities")
+    @patch("httpx.Client")
+    def test_fetch_consensus_retries_on_failure(
+        self, mock_client_class, mock_get_shuffled_authorities
+    ):
+        """Test fetching consensus retries when first authority fails."""
+        # Setup mock authorities
+        authority1 = DirectoryAuthority(
+            nickname="failing",
+            ip="192.0.2.1",
+            dirport=80,
+            orport=443,
+            v3ident="FAIL",
+        )
+        authority2 = DirectoryAuthority(
+            nickname="working",
+            ip="192.0.2.2",
+            dirport=80,
+            orport=443,
+            v3ident="WORK",
+        )
+        mock_get_shuffled_authorities.return_value = [authority1, authority2]
+
+        # Setup mock to fail on first call, succeed on second
+        mock_response = MagicMock()
+        mock_response.content = b"consensus data"
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.get.side_effect = [
+            httpx.ConnectError("Connection failed"),
+            mock_response,
+        ]
+        mock_client_instance.__enter__.return_value = mock_client_instance
+        mock_client_instance.__exit__.return_value = False
+        mock_client_class.return_value = mock_client_instance
+
+        client = DirectoryClient()
+        content, used_authority = client.fetch_consensus()
+
+        # Verify second authority was used after first failed
+        assert used_authority == authority2
+        assert mock_client_instance.get.call_count == 2
 
     @patch("httpx.Client")
     def test_fetch_consensus_with_custom_timeout(self, mock_client_class):
