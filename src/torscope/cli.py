@@ -11,6 +11,7 @@ from collections.abc import Callable
 from torscope import __version__
 from torscope.cache import load_consensus, save_consensus
 from torscope.directory.authority import get_authorities
+from torscope.directory.fallback import get_fallbacks
 from torscope.directory.client import DirectoryClient
 from torscope.directory.consensus import ConsensusParser
 from torscope.directory.descriptor import ServerDescriptorParser
@@ -67,6 +68,21 @@ def cmd_authorities(args: argparse.Namespace) -> int:  # pylint: disable=unused-
         print(f"      Identity: {auth.v3ident}")
         if auth.ipv6_address:
             print(f"      IPv6: {auth.ipv6_address}")
+        print()
+    return 0
+
+
+def cmd_fallbacks(args: argparse.Namespace) -> int:  # pylint: disable=unused-argument
+    """List fallback directories."""
+    fallbacks = get_fallbacks()
+    print(f"Fallback Directories ({len(fallbacks)} total):\n")
+    for i, fb in enumerate(fallbacks, 1):
+        name = fb.nickname or "unnamed"
+        print(f"  [{i:3}] {name}")
+        print(f"        Address: {fb.address}")
+        print(f"        Fingerprint: {fb.fingerprint}")
+        if fb.ipv6_address:
+            print(f"        IPv6: {fb.ipv6_address}")
         print()
     return 0
 
@@ -352,6 +368,9 @@ def main() -> int:
     # authorities command
     subparsers.add_parser("authorities", help="List all directory authorities")
 
+    # fallbacks command
+    subparsers.add_parser("fallbacks", help="List fallback directories")
+
     # relays command
     relays_parser = subparsers.add_parser("relays", help="List relays from network consensus")
     relays_parser.add_argument(
@@ -384,6 +403,7 @@ def main() -> int:
     commands: dict[str, Callable[[argparse.Namespace], int]] = {
         "version": cmd_version,
         "authorities": cmd_authorities,
+        "fallbacks": cmd_fallbacks,
         "relays": cmd_relays,
         "relay": cmd_relay,
         "extra-info": cmd_extra_info,
