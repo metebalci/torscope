@@ -160,6 +160,41 @@ class DirectoryClient:
             response.raise_for_status()
             return response.content, authority
 
+    def fetch_extra_info(
+        self,
+        fingerprints: list[str],
+        authority: Optional[DirectoryAuthority] = None,
+    ) -> tuple[bytes, DirectoryAuthority]:
+        """
+        Fetch extra-info descriptors by fingerprints.
+
+        Args:
+            fingerprints: List of hex-encoded fingerprints
+            authority: Directory authority to fetch from (random if None)
+
+        Returns:
+            Tuple of (descriptors_bytes, authority_used)
+
+        Raises:
+            httpx.HTTPError: If fetch fails
+        """
+        if authority is None:
+            authority = get_random_authority()
+
+        # Join fingerprints with '+'
+        fp_string = "+".join(fingerprints)
+        url = f"{authority.http_url}/tor/extra/fp/{fp_string}"
+
+        headers = {
+            "Accept-Encoding": "deflate, gzip",
+            "User-Agent": "torscope/0.1.0",
+        }
+
+        with httpx.Client(timeout=self.timeout) as client:
+            response = client.get(url, headers=headers, follow_redirects=True)
+            response.raise_for_status()
+            return response.content, authority
+
     def fetch_key_certificates(
         self,
         authority: Optional[DirectoryAuthority] = None,

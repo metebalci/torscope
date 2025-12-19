@@ -14,6 +14,7 @@ from torscope.directory.authority import get_authorities
 from torscope.directory.client import DirectoryClient
 from torscope.directory.consensus import ConsensusParser
 from torscope.directory.descriptor import ServerDescriptorParser
+from torscope.directory.extra_info import ExtraInfoParser
 from torscope.directory.models import ConsensusDocument
 
 
@@ -205,6 +206,107 @@ def cmd_relay(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_extra_info(args: argparse.Namespace) -> int:
+    """Show extra-info statistics for a relay."""
+    try:
+        consensus = get_consensus(args.no_cache)
+
+        # Find relay by fingerprint or nickname
+        query = args.query.upper()
+        relay = None
+
+        for r in consensus.routers:
+            if r.fingerprint.startswith(query):
+                relay = r
+                break
+            if r.nickname.upper() == query:
+                relay = r
+                break
+
+        if relay is None:
+            print(f"Relay not found: {args.query}", file=sys.stderr)
+            return 1
+
+        # Fetch extra-info
+        client = DirectoryClient()
+        print(f"Fetching extra-info for {relay.nickname}...", file=sys.stderr)
+        extra_content, _ = client.fetch_extra_info([relay.fingerprint])
+        extra_infos = ExtraInfoParser.parse(extra_content)
+
+        if not extra_infos:
+            print(f"No extra-info available for {relay.nickname}", file=sys.stderr)
+            return 1
+
+        extra = extra_infos[0]
+
+        # Display header
+        print(f"\nExtra-Info: {relay.nickname}")
+        print("=" * 70)
+        print(f"  Fingerprint:  {relay.fingerprint}")
+        print(f"  Published:    {extra.published} UTC")
+
+        # Bandwidth history
+        if extra.write_history or extra.read_history:
+            print("\n  Bandwidth History:")
+            print("  " + "-" * 40)
+            if extra.write_history:
+                avg = extra.write_history.average_bytes_per_second
+                total = extra.write_history.total_bytes
+                print(f"  Write:  {avg / 1_000_000:.2f} MB/s avg, {total / 1_000_000_000:.2f} GB total")
+            if extra.read_history:
+                avg = extra.read_history.average_bytes_per_second
+                total = extra.read_history.total_bytes
+                print(f"  Read:   {avg / 1_000_000:.2f} MB/s avg, {total / 1_000_000_000:.2f} GB total")
+
+        # Directory request stats
+        if extra.dirreq_v3_ips:
+            print("\n  Directory Requests:")
+            print("  " + "-" * 40)
+            total_ips = sum(extra.dirreq_v3_ips.values())
+            print(f"  Unique IPs:  {total_ips:,}")
+            top = sorted(extra.dirreq_v3_ips.items(), key=lambda x: x[1], reverse=True)[:10]
+            print("  By country:  " + ", ".join(f"{c}={n}" for c, n in top))
+
+        # Entry stats (for guards)
+        if extra.entry_ips:
+            print("\n  Entry/Guard Statistics:")
+            print("  " + "-" * 40)
+            total = sum(extra.entry_ips.values())
+            print(f"  Unique IPs:  {total:,}")
+            top = sorted(extra.entry_ips.items(), key=lambda x: x[1], reverse=True)[:10]
+            print("  By country:  " + ", ".join(f"{c}={n}" for c, n in top))
+
+        # Exit stats
+        if extra.exit_streams_opened or extra.exit_kibibytes_written:
+            print("\n  Exit Statistics:")
+            print("  " + "-" * 40)
+            if extra.exit_streams_opened:
+                total = sum(extra.exit_streams_opened.values())
+                print(f"  Streams:     {total:,} opened")
+                top = sorted(extra.exit_streams_opened.items(), key=lambda x: x[1], reverse=True)[:10]
+                print("  Top ports:   " + ", ".join(f"{p}={n}" for p, n in top))
+            if extra.exit_kibibytes_written:
+                written = sum(extra.exit_kibibytes_written.values())
+                read = sum(extra.exit_kibibytes_read.values()) if extra.exit_kibibytes_read else 0
+                print(f"  Traffic:     {written / 1024:.2f} MiB written, {read / 1024:.2f} MiB read")
+
+        # Hidden service stats
+        if extra.hidserv_rend_relayed_cells is not None or extra.hidserv_dir_onions_seen is not None:
+            print("\n  Hidden Service Statistics:")
+            print("  " + "-" * 40)
+            if extra.hidserv_rend_relayed_cells is not None:
+                print(f"  Rend cells relayed:  {extra.hidserv_rend_relayed_cells:,}")
+            if extra.hidserv_dir_onions_seen is not None:
+                print(f"  Onions seen:         {extra.hidserv_dir_onions_seen:,}")
+
+        return 0
+
+    # pylint: disable-next=broad-exception-caught
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
 class _SubcommandHelpFormatter(argparse.RawDescriptionHelpFormatter):
     """Custom formatter to clean up subcommand help display."""
 
@@ -265,6 +367,13 @@ def main() -> int:
     )
     relay_parser.add_argument("--no-cache", action="store_true", help="Bypass cache, fetch fresh")
 
+    # extra-info command
+    extra_info_parser = subparsers.add_parser("extra-info", help="Show extra-info statistics for a relay")
+    extra_info_parser.add_argument(
+        "query", metavar="nickname|fingerprint", help="Relay nickname or fingerprint (partial ok)"
+    )
+    extra_info_parser.add_argument("--no-cache", action="store_true", help="Bypass cache, fetch fresh")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -277,6 +386,7 @@ def main() -> int:
         "authorities": cmd_authorities,
         "relays": cmd_relays,
         "relay": cmd_relay,
+        "extra-info": cmd_extra_info,
     }
 
     try:

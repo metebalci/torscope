@@ -11,6 +11,7 @@ from torscope.directory.certificates import KeyCertificateParser
 from torscope.directory.client import DirectoryClient
 from torscope.directory.consensus import ConsensusParser
 from torscope.directory.descriptor import ServerDescriptorParser
+from torscope.directory.extra_info import ExtraInfoParser
 from torscope.directory.fallback import (
     FallbackDirectory,
     get_fallbacks,
@@ -20,8 +21,10 @@ from torscope.directory.fallback import (
 from torscope.directory.microdescriptor import MicrodescriptorParser
 from torscope.directory.models import (
     AuthorityEntry,
+    BandwidthHistory,
     ConsensusDocument,
     DirectorySignature,
+    ExtraInfoDescriptor,
     KeyCertificate,
     Microdescriptor,
     RouterStatusEntry,
@@ -42,10 +45,13 @@ __all__ = [
     "DirectoryClient",
     "ConsensusParser",
     "ServerDescriptorParser",
+    "ExtraInfoParser",
     "MicrodescriptorParser",
     "AuthorityEntry",
+    "BandwidthHistory",
     "ConsensusDocument",
     "DirectorySignature",
+    "ExtraInfoDescriptor",
     "KeyCertificate",
     "Microdescriptor",
     "RouterStatusEntry",

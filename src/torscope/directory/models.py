@@ -324,6 +324,102 @@ class ServerDescriptor:
 
 
 @dataclass
+class BandwidthHistory:
+    """Represents bandwidth history data from extra-info descriptors."""
+
+    timestamp: datetime  # End of most recent interval
+    interval_seconds: int  # Interval length
+    values: list[int] = field(default_factory=list)  # Bytes per interval, oldest to newest
+
+    @property
+    def total_bytes(self) -> int:
+        """Get total bytes across all intervals."""
+        return sum(self.values)
+
+    @property
+    def average_bytes_per_second(self) -> float:
+        """Get average bytes per second."""
+        if not self.values or self.interval_seconds == 0:
+            return 0.0
+        return self.total_bytes / (len(self.values) * self.interval_seconds)
+
+
+@dataclass
+class ExtraInfoDescriptor:
+    """Represents an extra-info descriptor with relay statistics."""
+
+    # Identity
+    nickname: str
+    fingerprint: str  # hex-encoded
+    published: datetime
+
+    # Bandwidth history
+    write_history: BandwidthHistory | None = None
+    read_history: BandwidthHistory | None = None
+    dirreq_write_history: BandwidthHistory | None = None
+    dirreq_read_history: BandwidthHistory | None = None
+
+    # GeoIP database digests
+    geoip_db_digest: str | None = None
+    geoip6_db_digest: str | None = None
+
+    # Directory request statistics
+    dirreq_stats_end: datetime | None = None
+    dirreq_v3_ips: dict[str, int] = field(default_factory=dict)  # country -> count
+    dirreq_v3_reqs: dict[str, int] = field(default_factory=dict)
+    dirreq_v3_resp: dict[str, int] = field(default_factory=dict)  # status -> count
+
+    # Entry statistics (for guards)
+    entry_stats_end: datetime | None = None
+    entry_ips: dict[str, int] = field(default_factory=dict)  # country -> count
+
+    # Exit statistics
+    exit_stats_end: datetime | None = None
+    exit_kibibytes_written: dict[str, int] = field(default_factory=dict)  # port -> KiB
+    exit_kibibytes_read: dict[str, int] = field(default_factory=dict)
+    exit_streams_opened: dict[str, int] = field(default_factory=dict)  # port -> count
+
+    # Cell statistics
+    cell_stats_end: datetime | None = None
+    cell_processed_cells: list[float] = field(default_factory=list)  # deciles
+    cell_queued_cells: list[float] = field(default_factory=list)
+    cell_time_in_queue: list[int] = field(default_factory=list)  # milliseconds
+
+    # Hidden service statistics
+    hidserv_stats_end: datetime | None = None
+    hidserv_rend_relayed_cells: int | None = None
+    hidserv_dir_onions_seen: int | None = None
+
+    # Raw descriptor
+    raw_descriptor: str = ""
+
+    @property
+    def total_written_bytes(self) -> int:
+        """Get total bytes written from history."""
+        return self.write_history.total_bytes if self.write_history else 0
+
+    @property
+    def total_read_bytes(self) -> int:
+        """Get total bytes read from history."""
+        return self.read_history.total_bytes if self.read_history else 0
+
+    @property
+    def is_exit(self) -> bool:
+        """Check if this relay has exit statistics."""
+        return bool(self.exit_kibibytes_written or self.exit_streams_opened)
+
+    @property
+    def is_guard(self) -> bool:
+        """Check if this relay has entry/guard statistics."""
+        return bool(self.entry_ips)
+
+    @property
+    def is_directory(self) -> bool:
+        """Check if this relay serves directory requests."""
+        return bool(self.dirreq_v3_ips or self.dirreq_v3_reqs)
+
+
+@dataclass
 class KeyCertificate:
     """Represents an authority key certificate.
 
