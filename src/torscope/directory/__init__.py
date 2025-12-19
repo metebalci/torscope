@@ -5,10 +5,18 @@ from torscope.directory.authority import (
     get_authorities,
     get_authority_by_nickname,
     get_random_authority,
+    get_shuffled_authorities,
 )
 from torscope.directory.certificates import KeyCertificateParser
 from torscope.directory.client import DirectoryClient
 from torscope.directory.consensus import ConsensusParser
+from torscope.directory.descriptor import ServerDescriptorParser
+from torscope.directory.fallback import (
+    FallbackDirectory,
+    get_fallbacks,
+    get_random_fallback,
+    get_shuffled_fallbacks,
+)
 from torscope.directory.microdescriptor import MicrodescriptorParser
 from torscope.directory.models import (
     AuthorityEntry,
@@ -17,6 +25,7 @@ from torscope.directory.models import (
     KeyCertificate,
     Microdescriptor,
     RouterStatusEntry,
+    ServerDescriptor,
 )
 
 __all__ = [
@@ -24,9 +33,15 @@ __all__ = [
     "get_authorities",
     "get_authority_by_nickname",
     "get_random_authority",
+    "get_shuffled_authorities",
+    "FallbackDirectory",
+    "get_fallbacks",
+    "get_random_fallback",
+    "get_shuffled_fallbacks",
     "KeyCertificateParser",
     "DirectoryClient",
     "ConsensusParser",
+    "ServerDescriptorParser",
     "MicrodescriptorParser",
     "AuthorityEntry",
     "ConsensusDocument",
@@ -34,4 +49,5 @@ __all__ = [
     "KeyCertificate",
     "Microdescriptor",
     "RouterStatusEntry",
+    "ServerDescriptor",
 ]

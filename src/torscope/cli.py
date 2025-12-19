@@ -6,13 +6,14 @@ Provides command-line tools for exploring the Tor network.
 
 import argparse
 import sys
-from typing import Optional
+from typing import Callable, Optional
 
 from torscope import __version__
 from torscope.cache import load_consensus, save_consensus
 from torscope.directory.authority import get_authorities, get_authority_by_nickname
 from torscope.directory.client import DirectoryClient
 from torscope.directory.consensus import ConsensusParser
+from torscope.directory.descriptor import ServerDescriptorParser
 from torscope.directory.microdescriptor import MicrodescriptorParser
 from torscope.directory.models import ConsensusDocument
 
@@ -145,19 +146,71 @@ def cmd_list_relays(args: argparse.Namespace) -> int:
 
         # Display header
         print(f"\nRelays (showing {len(relays)} of {total:,}):\n")
-        print(f"{'Nickname':<20} {'Fingerprint':<10} {'Address':<22} {'Bandwidth':<12} {'Flags'}")
-        print("-" * 100)
+        print(f"{'Nickname':<20} {'Fingerprint':<11} {'Flags'}")
+        print("-" * 70)
 
         # Display relays
         for relay in relays:
-            nickname = relay.nickname[:19]
+            nickname = relay.nickname[:17] + "..." if len(relay.nickname) > 20 else relay.nickname
             fp = relay.short_fingerprint
-            address = f"{relay.ip}:{relay.orport}"
-            bw = f"{relay.bandwidth / 1_000_000:.1f} MB/s" if relay.bandwidth else "unknown"
-            flags = ",".join(relay.flags[:5])
-            if len(relay.flags) > 5:
-                flags += "..."
-            print(f"{nickname:<20} {fp:<10} {address:<22} {bw:<12} {flags}")
+            flags = ",".join(relay.flags)
+            print(f"{nickname:<20} {fp:<11} {flags}")
+
+        return 0
+
+    # pylint: disable-next=broad-exception-caught
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_relay(args: argparse.Namespace) -> int:
+    """Show details for a specific relay."""
+    try:
+        consensus = get_consensus(None, args.no_cache)
+
+        # Find relay by fingerprint or nickname
+        query = args.query.upper()
+        relay = None
+
+        for r in consensus.routers:
+            # Match by fingerprint (full or partial)
+            if r.fingerprint.startswith(query):
+                relay = r
+                break
+            # Match by nickname (case-insensitive)
+            if r.nickname.upper() == query:
+                relay = r
+                break
+
+        if relay is None:
+            print(f"Relay not found: {args.query}", file=sys.stderr)
+            return 1
+
+        # Display relay details
+        print(f"\nRelay: {relay.nickname}")
+        print("=" * 60)
+        print(f"  Fingerprint:  {relay.fingerprint}")
+        print(f"  Address:      {relay.ip}:{relay.orport}")
+        if relay.dirport:
+            print(f"  DirPort:      {relay.dirport}")
+        if relay.ipv6_addresses:
+            for addr in relay.ipv6_addresses:
+                print(f"  IPv6:         {addr}")
+        print(f"  Published:    {relay.published} UTC")
+        print(f"  Flags:        {', '.join(relay.flags)}")
+        if relay.version:
+            print(f"  Version:      {relay.version}")
+        if relay.bandwidth:
+            bw_mbps = relay.bandwidth / 1_000_000
+            print(f"  Bandwidth:    {bw_mbps:.2f} MB/s")
+        if relay.measured:
+            measured_mbps = relay.measured / 1_000_000
+            print(f"  Measured:     {measured_mbps:.2f} MB/s")
+        if relay.exit_policy:
+            print(f"  Exit Policy:  {relay.exit_policy}")
+        if relay.microdesc_hash:
+            print(f"  Microdesc:    {relay.microdesc_hash}")
 
         return 0
 
@@ -218,14 +271,143 @@ def cmd_fetch_microdescriptors(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_fetch_descriptor(args: argparse.Namespace) -> int:
+    """Fetch full server descriptor for a relay."""
+    try:
+        consensus = get_consensus(None, args.no_cache)
+
+        # Find relay by fingerprint or nickname
+        query = args.query.upper()
+        relay = None
+
+        for r in consensus.routers:
+            if r.fingerprint.startswith(query):
+                relay = r
+                break
+            if r.nickname.upper() == query:
+                relay = r
+                break
+
+        if relay is None:
+            print(f"Relay not found: {args.query}", file=sys.stderr)
+            return 1
+
+        # Fetch the server descriptor
+        client = DirectoryClient()
+        print(f"Fetching descriptor for {relay.nickname}...", file=sys.stderr)
+        content, used_authority = client.fetch_server_descriptors([relay.fingerprint])
+        print(f"Downloaded {len(content):,} bytes from {used_authority.nickname}", file=sys.stderr)
+
+        # Parse the descriptor
+        descriptors = ServerDescriptorParser.parse(content)
+        if not descriptors:
+            print("Failed to parse descriptor", file=sys.stderr)
+            return 1
+
+        desc = descriptors[0]
+
+        # Display descriptor details
+        print(f"\nServer Descriptor: {desc.nickname}")
+        print("=" * 70)
+        print(f"  Fingerprint:    {desc.fingerprint}")
+        print(f"  Address:        {desc.ip}:{desc.orport}")
+        if desc.dirport:
+            print(f"  DirPort:        {desc.dirport}")
+        for addr in desc.ipv6_addresses:
+            print(f"  IPv6:           {addr}")
+        print(f"  Published:      {desc.published} UTC")
+
+        if desc.platform:
+            print(f"  Platform:       {desc.platform}")
+        if desc.tor_version:
+            print(f"  Tor Version:    {desc.tor_version}")
+
+        print("\n  Bandwidth:")
+        print(f"    Average:      {desc.bandwidth_avg / 1_000_000:.2f} MB/s")
+        print(f"    Burst:        {desc.bandwidth_burst / 1_000_000:.2f} MB/s")
+        print(f"    Observed:     {desc.bandwidth_observed / 1_000_000:.2f} MB/s")
+
+        if desc.uptime is not None:
+            days = desc.uptime_days
+            print(f"  Uptime:         {days:.1f} days ({desc.uptime:,} seconds)")
+
+        if desc.contact:
+            print(f"  Contact:        {desc.contact}")
+
+        if desc.family:
+            print(f"  Family:         {len(desc.family)} members")
+            for member in desc.family[:5]:
+                print(f"                  {member}")
+            if len(desc.family) > 5:
+                print(f"                  ... and {len(desc.family) - 5} more")
+
+        if desc.exit_policy:
+            print(f"\n  Exit Policy ({len(desc.exit_policy)} rules):")
+            for rule in desc.exit_policy[:10]:
+                print(f"    {rule}")
+            if len(desc.exit_policy) > 10:
+                print(f"    ... and {len(desc.exit_policy) - 10} more rules")
+
+        # Flags
+        flags = []
+        if desc.hibernating:
+            flags.append("hibernating")
+        if desc.caches_extra_info:
+            flags.append("caches-extra-info")
+        if desc.tunnelled_dir_server:
+            flags.append("tunnelled-dir-server")
+        if flags:
+            print(f"\n  Flags:          {', '.join(flags)}")
+
+        if desc.ntor_onion_key:
+            print(f"\n  ntor-onion-key: {desc.ntor_onion_key[:40]}...")
+
+        return 0
+
+    # pylint: disable-next=broad-exception-caught
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
+class _SubcommandHelpFormatter(argparse.RawDescriptionHelpFormatter):
+    """Custom formatter to clean up subcommand help display."""
+
+    def __init__(self, prog: str) -> None:
+        super().__init__(prog, max_help_position=28)
+
+    def _metavar_formatter(
+        self, action: argparse.Action, default_metavar: str
+    ) -> Callable[[int], tuple[str, ...]]:
+        if action.metavar == "":
+            return lambda tuple_size: ("",) * tuple_size
+        return super()._metavar_formatter(action, default_metavar)
+
+    def _format_action(self, action: argparse.Action) -> str:
+        # pylint: disable-next=protected-access
+        if isinstance(action, argparse._SubParsersAction):
+            # Custom formatting for subcommands with fixed column width
+            lines = []
+            # _choices_actions contains the help info for each subcommand
+            for choice_action in action._choices_actions:  # pylint: disable=protected-access
+                name = choice_action.metavar or choice_action.dest
+                cmd_help = choice_action.help or ""
+                # Fixed width of 24 chars for command name, 2 space indent
+                lines.append(f"  {name:<24}{cmd_help}")
+            return "\n".join(lines) + "\n"
+        return super()._format_action(action)
+
+
 def main() -> int:
     """Main entry point for the torscope CLI."""
     parser = argparse.ArgumentParser(
         prog="torscope",
         description="Tor Network Information Tool",
+        usage="torscope [options] <command> [command_options]",
+        formatter_class=_SubcommandHelpFormatter,
     )
 
-    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+    subparsers = parser.add_subparsers(dest="command", metavar="", title="commands")
 
     # version command
     subparsers.add_parser("version", help="Display the torscope version")
@@ -247,8 +429,8 @@ def main() -> int:
         "--authority", metavar="NAME", help="Specific authority to fetch from"
     )
 
-    # list-relays command
-    list_relays = subparsers.add_parser("list-relays", help="List relays from network consensus")
+    # relays command
+    list_relays = subparsers.add_parser("relays", help="List relays from network consensus")
     list_relays.add_argument(
         "--limit", type=int, default=50, help="Maximum relays to display (default: 50)"
     )
@@ -269,6 +451,18 @@ def main() -> int:
     fetch_mds.add_argument("--authority", metavar="NAME", help="Specific authority to fetch from")
     fetch_mds.add_argument("--no-cache", action="store_true", help="Bypass cache, fetch fresh")
 
+    # relay command
+    relay_parser = subparsers.add_parser("relay", help="Show details for a specific relay")
+    relay_parser.add_argument("query", metavar="nickname|fingerprint", help="Relay nickname or fingerprint (partial ok)")
+    relay_parser.add_argument("--no-cache", action="store_true", help="Bypass cache, fetch fresh")
+
+    # fetch-descriptor command
+    fetch_desc = subparsers.add_parser(
+        "fetch-descriptor", help="Fetch full server descriptor for a relay"
+    )
+    fetch_desc.add_argument("query", metavar="nickname|fingerprint", help="Relay nickname or fingerprint (partial ok)")
+    fetch_desc.add_argument("--no-cache", action="store_true", help="Bypass cache, fetch fresh")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -280,8 +474,10 @@ def main() -> int:
         "version": cmd_version,
         "authorities": cmd_authorities,
         "fetch-consensus": cmd_fetch_consensus,
-        "list-relays": cmd_list_relays,
+        "relays": cmd_list_relays,
+        "relay": cmd_relay,
         "fetch-microdescriptors": cmd_fetch_microdescriptors,
+        "fetch-descriptor": cmd_fetch_descriptor,
     }
 
     try:

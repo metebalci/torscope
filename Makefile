@@ -18,4 +18,4 @@ upload: dist-clean build
 	python -m twine upload dist/*
 
 update-authorities:
-	curl -o src/torscope/directory/auth_dirs.inc https://gitlab.torproject.org/tpo/core/tor/-/raw/main/src/app/config/auth_dirs.inc
+	python scripts/update_authorities.py

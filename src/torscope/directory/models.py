@@ -258,6 +258,72 @@ class Microdescriptor:
 
 
 @dataclass
+class ServerDescriptor:
+    """Represents a full server descriptor."""
+
+    # Required fields
+    nickname: str
+    fingerprint: str  # hex-encoded identity fingerprint
+    published: datetime
+    ip: str
+    orport: int
+
+    # Optional addressing
+    dirport: int = 0
+    ipv6_addresses: list[str] = field(default_factory=list)
+
+    # Platform/version info
+    platform: Optional[str] = None
+    tor_version: Optional[str] = None
+
+    # Bandwidth
+    bandwidth_avg: int = 0  # bytes/sec
+    bandwidth_burst: int = 0
+    bandwidth_observed: int = 0
+
+    # Uptime
+    uptime: Optional[int] = None  # seconds
+
+    # Contact
+    contact: Optional[str] = None
+
+    # Exit policy
+    exit_policy: list[str] = field(default_factory=list)
+
+    # Keys
+    onion_key: Optional[str] = None  # RSA public key (PEM)
+    signing_key: Optional[str] = None  # RSA public key (PEM)
+    ntor_onion_key: Optional[str] = None  # curve25519 (base64)
+
+    # Family
+    family: list[str] = field(default_factory=list)
+
+    # Flags/features
+    hibernating: bool = False
+    allow_single_hop_exits: bool = False
+    caches_extra_info: bool = False
+    tunnelled_dir_server: bool = False
+
+    # Protocols
+    protocols: Optional[dict[str, list[int]]] = None
+
+    # Raw descriptor
+    raw_descriptor: str = ""
+
+    @property
+    def bandwidth_mbps(self) -> float:
+        """Get observed bandwidth in MB/s."""
+        return self.bandwidth_observed / 1_000_000
+
+    @property
+    def uptime_days(self) -> Optional[float]:
+        """Get uptime in days."""
+        if self.uptime is None:
+            return None
+        return self.uptime / 86400
+
+
+@dataclass
 class KeyCertificate:
     """Represents an authority key certificate.
 
