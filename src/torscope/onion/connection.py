@@ -1,0 +1,238 @@
+"""
+TLS connection to Tor relays.
+
+This module implements the link-level connection to Tor relays,
+including TLS setup and the link handshake protocol.
+"""
+
+import socket
+import ssl
+import struct
+from dataclasses import dataclass, field
+from types import TracebackType
+
+from torscope.onion.cell import (
+    CELL_LEN_V3,
+    CELL_LEN_V4,
+    AuthChallengeCell,
+    Cell,
+    CellCommand,
+    CertsCell,
+    NetInfoCell,
+    VersionsCell,
+)
+
+
+@dataclass
+class RelayConnection:
+    """
+    Connection to a Tor relay over TLS.
+
+    Handles the link protocol handshake and cell I/O.
+    """
+
+    host: str
+    port: int
+    _socket: socket.socket | None = field(default=None, repr=False)
+    _tls_socket: ssl.SSLSocket | None = field(default=None, repr=False)
+    link_protocol: int = 0  # Negotiated link protocol version
+    their_versions: list[int] = field(default_factory=list)
+    certs: CertsCell | None = None
+    auth_challenge: AuthChallengeCell | None = None
+    timeout: float = 30.0
+
+    # Supported link protocol versions
+    SUPPORTED_VERSIONS = [4, 5]
+
+    def connect(self) -> None:
+        """
+        Establish TLS connection to relay.
+
+        Creates a TLS connection without validating the relay's certificate
+        (Tor has its own certificate validation via CERTS cell).
+        """
+        # Create TCP socket
+        self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._socket.settimeout(self.timeout)
+        self._socket.connect((self.host, self.port))
+
+        # Wrap with TLS (no certificate verification - Tor handles this differently)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        # Set minimum TLS version for security
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+
+        self._tls_socket = context.wrap_socket(self._socket, server_hostname=self.host)
+
+    def close(self) -> None:
+        """Close the connection."""
+        if self._tls_socket:
+            try:
+                self._tls_socket.close()
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+            self._tls_socket = None
+        if self._socket:
+            try:
+                self._socket.close()
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+            self._socket = None
+
+    def handshake(self) -> bool:
+        """
+        Perform link protocol handshake.
+
+        1. Send VERSIONS cell
+        2. Receive VERSIONS cell
+        3. Negotiate highest common version
+        4. Receive CERTS cell
+        5. Receive AUTH_CHALLENGE cell
+        6. Receive NETINFO cell
+        7. Send NETINFO cell
+
+        Returns:
+            True if handshake successful, False otherwise
+        """
+        if not self._tls_socket:
+            raise ConnectionError("Not connected")
+
+        # Send our VERSIONS cell
+        versions_cell = VersionsCell(versions=self.SUPPORTED_VERSIONS)
+        self._send_raw(versions_cell.pack())
+
+        # Receive their VERSIONS cell (always uses 2-byte CircID)
+        their_versions_data = self._recv_variable_cell_v3()
+        their_versions = VersionsCell.unpack(their_versions_data)
+        self.their_versions = their_versions.versions
+
+        # Negotiate highest common version
+        common = set(self.SUPPORTED_VERSIONS) & set(self.their_versions)
+        if not common:
+            return False
+        self.link_protocol = max(common)
+
+        # Now receive CERTS, AUTH_CHALLENGE, NETINFO from responder
+        # These use the negotiated link protocol's CircID size
+
+        # Receive CERTS cell
+        certs_data = self._recv_variable_cell()
+        self.certs = CertsCell.unpack(certs_data, self.link_protocol)
+
+        # Receive AUTH_CHALLENGE cell
+        auth_data = self._recv_variable_cell()
+        self.auth_challenge = AuthChallengeCell.unpack(auth_data, self.link_protocol)
+
+        # Receive NETINFO cell (fixed-length)
+        netinfo_data = self._recv_fixed_cell()
+        their_netinfo = NetInfoCell.unpack(netinfo_data, self.link_protocol)
+
+        # Send our NETINFO cell
+        # We use their address as the "other address"
+        if their_netinfo.my_addresses:
+            other_addr = their_netinfo.my_addresses[0]
+        else:
+            other_addr = (4, b"\x00\x00\x00\x00")
+        my_netinfo = NetInfoCell(
+            other_address=other_addr,
+            my_addresses=[],  # We don't need to advertise our addresses
+        )
+        self._send_raw(my_netinfo.pack(self.link_protocol))
+
+        return True
+
+    def _send_raw(self, data: bytes) -> None:
+        """Send raw bytes over TLS connection."""
+        if not self._tls_socket:
+            raise ConnectionError("Not connected")
+        self._tls_socket.sendall(data)
+
+    def _recv_exact(self, length: int) -> bytes:
+        """Receive exactly `length` bytes."""
+        if not self._tls_socket:
+            raise ConnectionError("Not connected")
+
+        data = b""
+        while len(data) < length:
+            chunk = self._tls_socket.recv(length - len(data))
+            if not chunk:
+                raise ConnectionError("Connection closed")
+            data += chunk
+        return data
+
+    def _recv_fixed_cell(self) -> bytes:
+        """Receive a fixed-length cell."""
+        if self.link_protocol >= 4:
+            cell_len = CELL_LEN_V4
+        else:
+            cell_len = CELL_LEN_V3
+        return self._recv_exact(cell_len)
+
+    def _recv_variable_cell(self) -> bytes:
+        """Receive a variable-length cell using negotiated protocol."""
+        if self.link_protocol >= 4:
+            # CircID (4 bytes) + Command (1 byte)
+            header = self._recv_exact(5)
+            # Length (2 bytes)
+            length_bytes = self._recv_exact(2)
+            length = struct.unpack(">H", length_bytes)[0]
+            # Payload
+            payload = self._recv_exact(length)
+            return header + length_bytes + payload
+        else:
+            return self._recv_variable_cell_v3()
+
+    def _recv_variable_cell_v3(self) -> bytes:
+        """Receive a variable-length cell with 2-byte CircID (for VERSIONS)."""
+        # CircID (2 bytes) + Command (1 byte)
+        header = self._recv_exact(3)
+        # Length (2 bytes)
+        length_bytes = self._recv_exact(2)
+        length = struct.unpack(">H", length_bytes)[0]
+        # Payload
+        payload = self._recv_exact(length)
+        return header + length_bytes + payload
+
+    def send_cell(self, cell: Cell) -> None:
+        """Send a cell using the negotiated link protocol."""
+        self._send_raw(cell.pack(self.link_protocol))
+
+    def recv_cell(self) -> Cell:
+        """Receive a cell using the negotiated link protocol."""
+        # Peek at command byte to determine if fixed or variable length
+        if self.link_protocol >= 4:
+            header = self._recv_exact(5)
+            command = header[4]
+        else:
+            header = self._recv_exact(3)
+            command = header[2]
+
+        if CellCommand.is_variable_length(command):
+            # Variable-length cell
+            length_bytes = self._recv_exact(2)
+            length = struct.unpack(">H", length_bytes)[0]
+            payload = self._recv_exact(length)
+            return Cell.unpack(header + length_bytes + payload, self.link_protocol)
+        else:
+            # Fixed-length cell
+            if self.link_protocol >= 4:
+                body_len = CELL_LEN_V4 - 5
+            else:
+                body_len = CELL_LEN_V3 - 3
+            body = self._recv_exact(body_len)
+            return Cell.unpack(header + body, self.link_protocol)
+
+    def __enter__(self) -> "RelayConnection":
+        """Context manager entry."""
+        self.connect()
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        """Context manager exit."""
+        self.close()

@@ -11,12 +11,13 @@ from collections.abc import Callable
 from torscope import __version__
 from torscope.cache import load_consensus, save_consensus
 from torscope.directory.authority import get_authorities
-from torscope.directory.fallback import get_fallbacks
 from torscope.directory.client import DirectoryClient
 from torscope.directory.consensus import ConsensusParser
 from torscope.directory.descriptor import ServerDescriptorParser
 from torscope.directory.extra_info import ExtraInfoParser
+from torscope.directory.fallback import get_fallbacks
 from torscope.directory.models import ConsensusDocument
+from torscope.onion.connection import RelayConnection
 
 
 def get_consensus(no_cache: bool = False) -> ConsensusDocument:
@@ -263,13 +264,13 @@ def cmd_extra_info(args: argparse.Namespace) -> int:
             print("\n  Bandwidth History:")
             print("  " + "-" * 40)
             if extra.write_history:
-                avg = extra.write_history.average_bytes_per_second
-                total = extra.write_history.total_bytes
-                print(f"  Write:  {avg / 1_000_000:.2f} MB/s avg, {total / 1_000_000_000:.2f} GB total")
+                avg = extra.write_history.average_bytes_per_second / 1_000_000
+                total = extra.write_history.total_bytes / 1_000_000_000
+                print(f"  Write:  {avg:.2f} MB/s avg, {total:.2f} GB total")
             if extra.read_history:
-                avg = extra.read_history.average_bytes_per_second
-                total = extra.read_history.total_bytes
-                print(f"  Read:   {avg / 1_000_000:.2f} MB/s avg, {total / 1_000_000_000:.2f} GB total")
+                avg = extra.read_history.average_bytes_per_second / 1_000_000
+                total = extra.read_history.total_bytes / 1_000_000_000
+                print(f"  Read:   {avg:.2f} MB/s avg, {total:.2f} GB total")
 
         # Directory request stats
         if extra.dirreq_v3_ips:
@@ -296,15 +297,21 @@ def cmd_extra_info(args: argparse.Namespace) -> int:
             if extra.exit_streams_opened:
                 total = sum(extra.exit_streams_opened.values())
                 print(f"  Streams:     {total:,} opened")
-                top = sorted(extra.exit_streams_opened.items(), key=lambda x: x[1], reverse=True)[:10]
+                top_items = extra.exit_streams_opened.items()
+                top = sorted(top_items, key=lambda x: x[1], reverse=True)[:10]
                 print("  Top ports:   " + ", ".join(f"{p}={n}" for p, n in top))
             if extra.exit_kibibytes_written:
-                written = sum(extra.exit_kibibytes_written.values())
-                read = sum(extra.exit_kibibytes_read.values()) if extra.exit_kibibytes_read else 0
-                print(f"  Traffic:     {written / 1024:.2f} MiB written, {read / 1024:.2f} MiB read")
+                written = sum(extra.exit_kibibytes_written.values()) / 1024
+                if extra.exit_kibibytes_read:
+                    read = sum(extra.exit_kibibytes_read.values()) / 1024
+                else:
+                    read = 0
+                print(f"  Traffic:     {written:.2f} MiB written, {read:.2f} MiB read")
 
         # Hidden service stats
-        if extra.hidserv_rend_relayed_cells is not None or extra.hidserv_dir_onions_seen is not None:
+        has_rend = extra.hidserv_rend_relayed_cells is not None
+        has_onions = extra.hidserv_dir_onions_seen is not None
+        if has_rend or has_onions:
             print("\n  Hidden Service Statistics:")
             print("  " + "-" * 40)
             if extra.hidserv_rend_relayed_cells is not None:
@@ -313,6 +320,60 @@ def cmd_extra_info(args: argparse.Namespace) -> int:
                 print(f"  Onions seen:         {extra.hidserv_dir_onions_seen:,}")
 
         return 0
+
+    # pylint: disable-next=broad-exception-caught
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_connect(args: argparse.Namespace) -> int:
+    """Test OR protocol connection to a relay."""
+    try:
+        consensus = get_consensus(args.no_cache)
+
+        # Find relay by fingerprint or nickname
+        query = args.query.upper()
+        relay = None
+
+        for r in consensus.routers:
+            if r.fingerprint.startswith(query):
+                relay = r
+                break
+            if r.nickname.upper() == query:
+                relay = r
+                break
+
+        if relay is None:
+            print(f"Relay not found: {args.query}", file=sys.stderr)
+            return 1
+
+        print(f"\nConnecting to {relay.nickname} ({relay.ip}:{relay.orport})...")
+
+        conn = RelayConnection(host=relay.ip, port=relay.orport, timeout=args.timeout)
+
+        try:
+            conn.connect()
+            print("  TLS connection established")
+
+            if conn.handshake():
+                print(f"  Link protocol version: {conn.link_protocol}")
+                print(f"  Their versions: {conn.their_versions}")
+                cert_count = len(conn.certs.certificates) if conn.certs else 0
+                print(f"  Certificates received: {cert_count}")
+                if conn.auth_challenge:
+                    print(f"  Auth methods: {conn.auth_challenge.methods}")
+                print("\n  Handshake successful!")
+                return 0
+            else:
+                print("  Handshake failed: no common protocol version", file=sys.stderr)
+                return 1
+
+        except ConnectionError as e:
+            print(f"  Connection error: {e}", file=sys.stderr)
+            return 1
+        finally:
+            conn.close()
 
     # pylint: disable-next=broad-exception-caught
     except Exception as e:
@@ -380,11 +441,29 @@ def main() -> int:
     relay_parser.add_argument("--no-cache", action="store_true", help="Bypass cache, fetch fresh")
 
     # extra-info command
-    extra_info_parser = subparsers.add_parser("extra-info", help="Show extra-info statistics for a relay")
-    extra_info_parser.add_argument(
-        "query", metavar="nickname|fingerprint", help="Relay nickname or fingerprint (partial ok)"
+    extra_info_parser = subparsers.add_parser(
+        "extra-info", help="Show extra-info statistics for a relay"
     )
-    extra_info_parser.add_argument("--no-cache", action="store_true", help="Bypass cache, fetch fresh")
+    extra_info_parser.add_argument(
+        "query", metavar="nickname|fingerprint", help="Relay nickname or fingerprint"
+    )
+    extra_info_parser.add_argument(
+        "--no-cache", action="store_true", help="Bypass cache, fetch fresh"
+    )
+
+    # connect command
+    connect_parser = subparsers.add_parser(
+        "connect", help="Test OR protocol connection to a relay"
+    )
+    connect_parser.add_argument(
+        "query", metavar="nickname|fingerprint", help="Relay nickname or fingerprint"
+    )
+    connect_parser.add_argument(
+        "--no-cache", action="store_true", help="Bypass cache, fetch fresh"
+    )
+    connect_parser.add_argument(
+        "--timeout", type=float, default=30.0, help="Connection timeout (default: 30s)"
+    )
 
     args = parser.parse_args()
 
@@ -400,6 +479,7 @@ def main() -> int:
         "relays": cmd_relays,
         "relay": cmd_relay,
         "extra-info": cmd_extra_info,
+        "connect": cmd_connect,
     }
 
     try:

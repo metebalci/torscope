@@ -1,0 +1,346 @@
+"""
+Tor cell format implementation.
+
+Cells are the basic unit of communication in the Tor protocol.
+Fixed-length cells are 512 bytes (514 for link protocol 4+).
+Variable-length cells have a 2-byte length field.
+"""
+
+import struct
+import time
+from dataclasses import dataclass, field
+from enum import IntEnum
+from typing import ClassVar
+
+
+class CellCommand(IntEnum):
+    """Cell command types."""
+
+    # Fixed-length cells (command < 128, except VERSIONS)
+    PADDING = 0
+    CREATE = 1
+    CREATED = 2
+    RELAY = 3
+    DESTROY = 4
+    CREATE_FAST = 5
+    CREATED_FAST = 6
+    NETINFO = 8
+    RELAY_EARLY = 9
+    CREATE2 = 10
+    CREATED2 = 11
+    PADDING_NEGOTIATE = 12
+
+    # Variable-length cells (command >= 128, plus VERSIONS)
+    VERSIONS = 7  # Special: variable-length despite being < 128
+    VPADDING = 128
+    CERTS = 129
+    AUTH_CHALLENGE = 130
+    AUTHENTICATE = 131
+    AUTHORIZE = 132
+
+    @classmethod
+    def is_variable_length(cls, command: int) -> bool:
+        """Check if a command uses variable-length cells."""
+        return command == cls.VERSIONS or command >= 128
+
+
+# Cell sizes
+CELL_LEN_V3 = 512  # Cell length for link protocol <= 3
+CELL_LEN_V4 = 514  # Cell length for link protocol >= 4
+CIRCID_LEN_V3 = 2  # CircID length for link protocol <= 3
+CIRCID_LEN_V4 = 4  # CircID length for link protocol >= 4
+
+
+@dataclass
+class Cell:
+    """Base class for Tor cells."""
+
+    circ_id: int
+    command: CellCommand
+    payload: bytes = b""
+
+    # Class variables for cell format
+    HEADER_FORMAT_V3: ClassVar[str] = ">HB"  # CircID (2 bytes) + Command (1 byte)
+    HEADER_FORMAT_V4: ClassVar[str] = ">IB"  # CircID (4 bytes) + Command (1 byte)
+    HEADER_LEN_V3: ClassVar[int] = 3
+    HEADER_LEN_V4: ClassVar[int] = 5
+
+    def pack(self, link_protocol: int = 4) -> bytes:
+        """
+        Pack cell into bytes for transmission.
+
+        Args:
+            link_protocol: Link protocol version (affects CircID size)
+
+        Returns:
+            Packed cell bytes
+        """
+        if link_protocol >= 4:
+            header = struct.pack(self.HEADER_FORMAT_V4, self.circ_id, self.command)
+            cell_len = CELL_LEN_V4
+            header_len = self.HEADER_LEN_V4
+        else:
+            header = struct.pack(self.HEADER_FORMAT_V3, self.circ_id, self.command)
+            cell_len = CELL_LEN_V3
+            header_len = self.HEADER_LEN_V3
+
+        if CellCommand.is_variable_length(self.command):
+            # Variable-length cell: header + length (2 bytes) + payload
+            length = struct.pack(">H", len(self.payload))
+            return header + length + self.payload
+        else:
+            # Fixed-length cell: header + payload padded to cell_len
+            body_len = cell_len - header_len
+            payload = self.payload[:body_len].ljust(body_len, b"\x00")
+            return header + payload
+
+    @classmethod
+    def unpack(cls, data: bytes, link_protocol: int = 4) -> "Cell":
+        """
+        Unpack cell from bytes.
+
+        Args:
+            data: Raw cell bytes
+            link_protocol: Link protocol version
+
+        Returns:
+            Parsed Cell object
+        """
+        if link_protocol >= 4:
+            circ_id, command = struct.unpack(cls.HEADER_FORMAT_V4, data[:5])
+            header_len = cls.HEADER_LEN_V4
+        else:
+            circ_id, command = struct.unpack(cls.HEADER_FORMAT_V3, data[:3])
+            header_len = cls.HEADER_LEN_V3
+
+        if CellCommand.is_variable_length(command):
+            # Variable-length cell
+            length = struct.unpack(">H", data[header_len : header_len + 2])[0]
+            payload = data[header_len + 2 : header_len + 2 + length]
+        else:
+            # Fixed-length cell
+            payload = data[header_len:]
+
+        return cls(circ_id=circ_id, command=CellCommand(command), payload=payload)
+
+
+@dataclass
+class VersionsCell:
+    """
+    VERSIONS cell for link protocol negotiation.
+
+    Sent by both sides immediately after TLS handshake.
+    Contains list of supported link protocol versions.
+    """
+
+    versions: list[int] = field(default_factory=lambda: [4, 5])
+
+    def pack(self) -> bytes:
+        """Pack VERSIONS cell. Always uses 2-byte CircID."""
+        # VERSIONS cell always uses CircID=0 and 2-byte CircID
+        payload = b"".join(struct.pack(">H", v) for v in self.versions)
+        header = struct.pack(">HBH", 0, CellCommand.VERSIONS, len(payload))
+        return header + payload
+
+    @classmethod
+    def unpack(cls, data: bytes) -> "VersionsCell":
+        """Unpack VERSIONS cell."""
+        # Skip header (CircID=2 bytes, Command=1 byte, Length=2 bytes)
+        payload = data[5:]
+        versions = []
+        for i in range(0, len(payload), 2):
+            if i + 2 <= len(payload):
+                versions.append(struct.unpack(">H", payload[i : i + 2])[0])
+        return cls(versions=versions)
+
+
+@dataclass
+class NetInfoCell:
+    """
+    NETINFO cell for exchanging time and address information.
+
+    Sent at the end of the link handshake by both sides.
+    """
+
+    timestamp: int = 0  # Unix timestamp
+    other_address: tuple[int, bytes] = (4, b"\x00\x00\x00\x00")  # (type, address)
+    my_addresses: list[tuple[int, bytes]] = field(default_factory=list)
+
+    # Address types
+    ADDR_TYPE_IPV4 = 4
+    ADDR_TYPE_IPV6 = 6
+
+    def pack(self, link_protocol: int = 4) -> bytes:
+        """Pack NETINFO cell."""
+        # Timestamp (4 bytes)
+        payload = struct.pack(">I", self.timestamp or int(time.time()))
+
+        # Other OR's address
+        addr_type, addr_data = self.other_address
+        payload += struct.pack("BB", addr_type, len(addr_data)) + addr_data
+
+        # My addresses
+        payload += struct.pack("B", len(self.my_addresses))
+        for addr_type, addr_data in self.my_addresses:
+            payload += struct.pack("BB", addr_type, len(addr_data)) + addr_data
+
+        # Create cell
+        cell = Cell(circ_id=0, command=CellCommand.NETINFO, payload=payload)
+        return cell.pack(link_protocol)
+
+    @classmethod
+    def unpack(cls, data: bytes, link_protocol: int = 4) -> "NetInfoCell":
+        """Unpack NETINFO cell."""
+        cell = Cell.unpack(data, link_protocol)
+        payload = cell.payload
+        offset = 0
+
+        # Timestamp
+        timestamp = struct.unpack(">I", payload[offset : offset + 4])[0]
+        offset += 4
+
+        # Other OR's address
+        addr_type = payload[offset]
+        addr_len = payload[offset + 1]
+        addr_data = payload[offset + 2 : offset + 2 + addr_len]
+        other_address = (addr_type, addr_data)
+        offset += 2 + addr_len
+
+        # My addresses
+        num_addrs = payload[offset]
+        offset += 1
+        my_addresses = []
+        for _ in range(num_addrs):
+            addr_type = payload[offset]
+            addr_len = payload[offset + 1]
+            addr_data = payload[offset + 2 : offset + 2 + addr_len]
+            my_addresses.append((addr_type, addr_data))
+            offset += 2 + addr_len
+
+        return cls(
+            timestamp=timestamp,
+            other_address=other_address,
+            my_addresses=my_addresses,
+        )
+
+
+class CertType(IntEnum):
+    """Certificate types for CERTS cell."""
+
+    RSA_LINK = 1  # RSA link key certificate
+    RSA_IDENTITY = 2  # RSA identity certificate
+    RSA_AUTHENTICATE = 3  # RSA AUTHENTICATE certificate
+    ED25519_SIGNING = 4  # Ed25519 signing key
+    ED25519_LINK = 5  # Ed25519 link certificate (TLS)
+    ED25519_AUTHENTICATE = 6  # Ed25519 AUTHENTICATE certificate
+    RSA_ED25519_CROSS = 7  # RSA->Ed25519 cross-certificate
+
+
+@dataclass
+class CertsCell:
+    """
+    CERTS cell containing certificates for authentication.
+
+    Sent by responder (and optionally initiator) during link handshake.
+    """
+
+    certificates: list[tuple[int, bytes]] = field(default_factory=list)  # (type, cert_data)
+
+    def pack(self, link_protocol: int = 4) -> bytes:
+        """Pack CERTS cell."""
+        # Number of certificates
+        payload = struct.pack("B", len(self.certificates))
+
+        # Each certificate: type (1 byte) + length (2 bytes) + data
+        for cert_type, cert_data in self.certificates:
+            payload += struct.pack(">BH", cert_type, len(cert_data)) + cert_data
+
+        # Create variable-length cell
+        if link_protocol >= 4:
+            header = struct.pack(">IBH", 0, CellCommand.CERTS, len(payload))
+        else:
+            header = struct.pack(">HBH", 0, CellCommand.CERTS, len(payload))
+
+        return header + payload
+
+    @classmethod
+    def unpack(cls, data: bytes, link_protocol: int = 4) -> "CertsCell":
+        """Unpack CERTS cell."""
+        # Parse header
+        if link_protocol >= 4:
+            header_len = 5 + 2  # CircID(4) + Command(1) + Length(2)
+        else:
+            header_len = 3 + 2  # CircID(2) + Command(1) + Length(2)
+
+        payload = data[header_len:]
+        offset = 0
+
+        # Number of certificates
+        num_certs = payload[offset]
+        offset += 1
+
+        certificates = []
+        for _ in range(num_certs):
+            cert_type = payload[offset]
+            cert_len = struct.unpack(">H", payload[offset + 1 : offset + 3])[0]
+            cert_data = payload[offset + 3 : offset + 3 + cert_len]
+            certificates.append((cert_type, cert_data))
+            offset += 3 + cert_len
+
+        return cls(certificates=certificates)
+
+
+@dataclass
+class AuthChallengeCell:
+    """
+    AUTH_CHALLENGE cell sent by responder.
+
+    Contains a random challenge that the initiator must sign
+    if it wants to authenticate.
+    """
+
+    challenge: bytes = b""  # 32 random bytes
+    methods: list[int] = field(default_factory=list)  # Authentication methods
+
+    # Authentication methods
+    AUTH_RSA_SHA256_TLSSECRET = 1
+    AUTH_ED25519_SHA256_RFC5705 = 3
+
+    def pack(self, link_protocol: int = 4) -> bytes:
+        """Pack AUTH_CHALLENGE cell."""
+        # Challenge (32 bytes) + number of methods (2 bytes) + methods (2 bytes each)
+        payload = self.challenge[:32].ljust(32, b"\x00")
+        payload += struct.pack(">H", len(self.methods))
+        for method in self.methods:
+            payload += struct.pack(">H", method)
+
+        # Create variable-length cell
+        if link_protocol >= 4:
+            header = struct.pack(">IBH", 0, CellCommand.AUTH_CHALLENGE, len(payload))
+        else:
+            header = struct.pack(">HBH", 0, CellCommand.AUTH_CHALLENGE, len(payload))
+
+        return header + payload
+
+    @classmethod
+    def unpack(cls, data: bytes, link_protocol: int = 4) -> "AuthChallengeCell":
+        """Unpack AUTH_CHALLENGE cell."""
+        # Parse header
+        if link_protocol >= 4:
+            header_len = 5 + 2  # CircID(4) + Command(1) + Length(2)
+        else:
+            header_len = 3 + 2  # CircID(2) + Command(1) + Length(2)
+
+        payload = data[header_len:]
+
+        # Challenge (32 bytes)
+        challenge = payload[:32]
+
+        # Number of methods and methods
+        num_methods = struct.unpack(">H", payload[32:34])[0]
+        methods = []
+        for i in range(num_methods):
+            method = struct.unpack(">H", payload[34 + i * 2 : 36 + i * 2])[0]
+            methods.append(method)
+
+        return cls(challenge=challenge, methods=methods)
