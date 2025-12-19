@@ -90,7 +90,7 @@ def cmd_fallbacks(args: argparse.Namespace) -> int:  # pylint: disable=unused-ar
 def cmd_relays(args: argparse.Namespace) -> int:
     """List relays from network consensus."""
     try:
-        consensus = get_consensus(args.no_cache)
+        consensus = get_consensus()
 
         # Filter relays
         relays = consensus.routers
@@ -98,11 +98,8 @@ def cmd_relays(args: argparse.Namespace) -> int:
             filter_flags = [f.strip() for f in args.flags.split(",")]
             relays = [r for r in relays if all(r.has_flag(flag) for flag in filter_flags)]
 
-        total = len(relays)
-        relays = relays[: args.limit]
-
         # Display header
-        print(f"\nRelays (showing {len(relays)} of {total:,}):\n")
+        print(f"\nRelays ({len(relays):,} total):\n")
         print(f"{'Nickname':<20} {'Fingerprint':<11} {'Flags'}")
         print("-" * 70)
 
@@ -373,11 +370,7 @@ def main() -> int:
 
     # relays command
     relays_parser = subparsers.add_parser("relays", help="List relays from network consensus")
-    relays_parser.add_argument(
-        "--limit", type=int, default=50, help="Maximum relays to display (default: 50)"
-    )
     relays_parser.add_argument("--flags", metavar="FLAGS", help="Filter by flags (comma-separated)")
-    relays_parser.add_argument("--no-cache", action="store_true", help="Bypass cache, fetch fresh")
 
     # relay command
     relay_parser = subparsers.add_parser("relay", help="Show details for a specific relay")
