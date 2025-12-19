@@ -11,6 +11,7 @@ from torscope.directory.certificates import KeyCertificateParser
 from torscope.directory.client import DirectoryClient
 from torscope.directory.consensus import ConsensusParser
 from torscope.directory.descriptor import ServerDescriptorParser
+from torscope.directory.exit_policy import ExitPolicy, check_exit_policy, parse_port_list
 from torscope.directory.extra_info import ExtraInfoParser
 from torscope.directory.fallback import (
     FallbackDirectory,
@@ -49,6 +50,9 @@ __all__ = [
     "ServerDescriptorParser",
     "ExtraInfoParser",
     "MicrodescriptorParser",
+    "ExitPolicy",
+    "check_exit_policy",
+    "parse_port_list",
     "AuthorityEntry",
     "BandwidthHistory",
     "ConsensusDocument",

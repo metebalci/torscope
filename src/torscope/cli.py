@@ -376,6 +376,7 @@ def _select_random_relay(
     consensus: ConsensusDocument,
     role: str,
     exclude: list[str] | None = None,
+    port: int | None = None,
 ) -> RouterStatusEntry | None:
     """
     Select a random relay appropriate for a circuit role.
@@ -384,6 +385,7 @@ def _select_random_relay(
         consensus: The consensus document
         role: One of "guard", "middle", "exit"
         exclude: List of fingerprints to exclude (avoid same relay twice)
+        port: Target port (for exit relay selection, filters by exit policy)
 
     Returns:
         A random relay suitable for the role, or None if none found
@@ -402,6 +404,7 @@ def _select_random_relay(
         ]
     elif role == "exit":
         # Exits need Exit, Stable, and Fast flags
+        # Also filter by exit policy if port is specified
         candidates = [
             r
             for r in consensus.routers
@@ -409,6 +412,7 @@ def _select_random_relay(
             and r.has_flag("Stable")
             and r.has_flag("Fast")
             and r.fingerprint not in exclude_set
+            and (port is None or r.allows_port(port))
         ]
     else:  # middle
         # Middle relays need Stable and Fast flags
@@ -541,13 +545,22 @@ def cmd_circuit(args: argparse.Namespace) -> int:  # pylint: disable=too-many-re
         # Resolve relays (None means random selection)
         relays = []
         used_fingerprints: list[str] = []
+        target_port = args.port  # For exit policy matching
 
         for role, query in relay_specs:
             if query is None:
                 # Random selection based on role
-                relay = _select_random_relay(consensus, role, used_fingerprints)
+                # Pass target port for exit relay selection
+                port_filter = target_port if role == "exit" else None
+                relay = _select_random_relay(consensus, role, used_fingerprints, port_filter)
                 if relay is None:
-                    print(f"No suitable {role} relay found", file=sys.stderr)
+                    if role == "exit" and target_port:
+                        print(
+                            f"No suitable {role} relay found for port {target_port}",
+                            file=sys.stderr,
+                        )
+                    else:
+                        print(f"No suitable {role} relay found", file=sys.stderr)
                     return 1
             else:
                 relay = _find_relay(consensus, query.strip())

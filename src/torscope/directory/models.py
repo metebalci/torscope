@@ -76,6 +76,24 @@ class RouterStatusEntry:
         """Check if relay is fast."""
         return self.has_flag("Fast")
 
+    def allows_port(self, port: int) -> bool:
+        """
+        Check if this relay's exit policy allows a specific port.
+
+        Uses the exit policy summary from the consensus "p" line.
+
+        Args:
+            port: Port number to check
+
+        Returns:
+            True if the port is allowed, False otherwise
+        """
+        # Import here to avoid circular imports
+        # pylint: disable-next=import-outside-toplevel
+        from torscope.directory.exit_policy import check_exit_policy
+
+        return check_exit_policy(self.exit_policy, port)
+
 
 @dataclass
 class AuthorityEntry:
