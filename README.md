@@ -1,10 +1,10 @@
-# torman
+# torscope
 
 A tool for exploring and getting information about the Tor network.
 
 ## Overview
 
-`torman` (Tor manual) is a Python command-line tool for fetching and analyzing information about the Tor network. It allows you to explore the Tor directory protocol, view relay information, and study the Tor specification in practice.
+`torscope` is a Python command-line tool for fetching and analyzing information about the Tor network. It allows you to explore the Tor directory protocol, view relay information, and study the Tor specification in practice.
 
 ## Features
 
@@ -17,7 +17,7 @@ A tool for exploring and getting information about the Tor network.
 ## Installation
 
 ```bash
-pip install torman
+pip install torscope
 ```
 
 For development:
@@ -30,16 +30,16 @@ pip install -e ".[dev]"
 
 ```bash
 # List all directory authorities
-torman -c authorities
+torscope -c authorities
 
 # Fetch network consensus
-torman -c fetch_consensus
+torscope -c fetch_consensus
 
 # List Guard relays
-torman -c "list_relays --flags Guard --limit 20"
+torscope -c "list_relays --flags Guard --limit 20"
 
 # Interactive mode
-torman
+torscope
 ```
 
 ## Development
@@ -61,7 +61,7 @@ pytest
 With coverage:
 
 ```bash
-pytest --cov=torman --cov-report=html
+pytest --cov=torscope --cov-report=html
 ```
 
 ### Code Formatting and Linting
@@ -83,7 +83,7 @@ mypy src
 
 ## License
 
-torman Tor Network Information Tool
+torscope Tor Network Information Tool
 Copyright (C) 2025-2026 Mete Balci
 
 This program is free software: you can redistribute it and/or modify
