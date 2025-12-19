@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "torscope"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A tool for exploring and getting information about the Tor network"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -52,6 +52,9 @@ torscope = "torscope.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "torscope.__version__"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
