@@ -441,6 +441,41 @@ class Circuit:
         # Unexpected response
         return None
 
+    def begin_dir(self) -> int | None:
+        """
+        Open a directory stream to the exit relay.
+
+        This uses RELAY_BEGIN_DIR to connect to the relay's built-in
+        directory server. The relay must have the V2Dir flag.
+
+        Returns:
+            Stream ID if successful, None if failed
+        """
+        stream_id = self._allocate_stream_id()
+
+        # Send RELAY_BEGIN_DIR (no payload needed)
+        begin_dir_cell = RelayCell(
+            relay_command=RelayCommand.BEGIN_DIR,
+            stream_id=stream_id,
+            data=b"",
+        )
+        self.send_relay(begin_dir_cell)
+
+        # Wait for RELAY_CONNECTED or RELAY_END
+        response = self.recv_relay()
+        if response is None:
+            return None
+
+        if response.relay_command == RelayCommand.CONNECTED:
+            return stream_id
+
+        if response.relay_command == RelayCommand.END:
+            # Directory stream was rejected (relay may not support V2Dir)
+            return None
+
+        # Unexpected response
+        return None
+
     def end_stream(self, stream_id: int, reason: RelayEndReason = RelayEndReason.DONE) -> None:
         """
         Close a stream.

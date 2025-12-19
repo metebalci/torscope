@@ -5,21 +5,30 @@ Provides command-line tools for exploring the Tor network.
 """
 
 import argparse
-import base64
 import random
 import sys
 import traceback
 from collections.abc import Callable
 
+import httpx
+
 from torscope import __version__
-from torscope.cache import load_consensus, save_consensus
+from torscope.cache import (
+    clear_cache,
+    get_ntor_key_from_cache,
+    load_consensus,
+    save_consensus,
+    save_microdescriptors,
+)
 from torscope.directory.authority import get_authorities
 from torscope.directory.client import DirectoryClient
 from torscope.directory.consensus import ConsensusParser
 from torscope.directory.descriptor import ServerDescriptorParser
 from torscope.directory.extra_info import ExtraInfoParser
 from torscope.directory.fallback import get_fallbacks
+from torscope.directory.microdescriptor import MicrodescriptorParser
 from torscope.directory.models import ConsensusDocument, RouterStatusEntry
+from torscope.directory.or_client import fetch_ntor_key
 from torscope.onion.circuit import Circuit
 from torscope.onion.connection import RelayConnection
 
@@ -41,20 +50,33 @@ def get_consensus(no_cache: bool = False) -> ConsensusDocument:
     if not no_cache:
         cached = load_consensus()
         if cached is not None:
-            print("Using cached consensus", file=sys.stderr)
-            return cached
+            consensus, meta = cached
+            source = meta["source"]
+            source_type = meta["source_type"]
+            msg = f"Using network consensus ({consensus.total_relays:,} relays) "
+            msg += f"from {source} ({source_type})"
+            print(msg, file=sys.stderr)
+            return consensus
+
+        # Check if there's an expired consensus
+        expired = load_consensus(allow_expired=True)
+        if expired is not None:
+            _, meta = expired
+            print(
+                f"Cached consensus from {meta['source']} ({meta['source_type']}) expired",
+                file=sys.stderr,
+            )
 
     # Fetch from network
     client = DirectoryClient()
-    print("Fetching consensus...", file=sys.stderr)
     content, used_authority = client.fetch_consensus(None, "microdesc")
     consensus = ConsensusParser.parse(content, used_authority.nickname)
-    print(
-        f"Fetched {consensus.total_relays:,} relays from {used_authority.nickname}", file=sys.stderr
-    )
+    msg = f"Fetched network consensus ({consensus.total_relays:,} relays) "
+    msg += f"from {used_authority.nickname} (authority)"
+    print(msg, file=sys.stderr)
 
-    # Save to cache
-    save_consensus(content, used_authority.nickname)
+    # Save consensus to cache
+    save_consensus(content, used_authority.nickname, "authority")
 
     return consensus
 
@@ -62,6 +84,13 @@ def get_consensus(no_cache: bool = False) -> ConsensusDocument:
 def cmd_version(args: argparse.Namespace) -> int:  # pylint: disable=unused-argument
     """Display the torscope version."""
     print(__version__)
+    return 0
+
+
+def cmd_clear(args: argparse.Namespace) -> int:  # pylint: disable=unused-argument
+    """Clear the cached consensus."""
+    clear_cache()
+    print("Cache cleared.")
     return 0
 
 
@@ -395,25 +424,108 @@ def _select_random_relay(
     return random.choice(candidates)
 
 
-def _get_ntor_key(client: DirectoryClient, fingerprint: str) -> bytes | None:
-    """Fetch and decode ntor-onion-key for a relay."""
-    content, _ = client.fetch_server_descriptors([fingerprint])
-    descriptors = ServerDescriptorParser.parse(content)
-    if not descriptors or not descriptors[0].ntor_onion_key:
+def _select_v2dir_relay(
+    consensus: ConsensusDocument, exclude: list[str] | None = None
+) -> RouterStatusEntry | None:
+    """Select a random V2Dir relay with a DirPort for fetching directory documents."""
+    exclude_set = set(exclude) if exclude else set()
+    candidates = [
+        r
+        for r in consensus.routers
+        if r.has_flag("V2Dir")
+        and r.has_flag("Fast")
+        and r.has_flag("Stable")
+        and r.dirport > 0  # Must have a DirPort
+        and r.fingerprint not in exclude_set
+    ]
+    if not candidates:
+        return None
+    return random.choice(candidates)
+
+
+def _fetch_microdesc_from_relay(
+    relay: RouterStatusEntry, hashes: list[str]
+) -> tuple[bytes, RouterStatusEntry] | None:
+    """Fetch microdescriptors from a V2Dir relay's DirPort."""
+    # Build URL for the relay's DirPort
+    hash_string = "-".join(h.rstrip("=") for h in hashes)
+    url = f"http://{relay.ip}:{relay.dirport}/tor/micro/d/{hash_string}"
+
+    headers = {
+        "Accept-Encoding": "deflate, gzip",
+        "User-Agent": "torscope/0.1.0",
+    }
+
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            response = client.get(url, headers=headers, follow_redirects=True)
+            response.raise_for_status()
+            return response.content, relay
+    except httpx.HTTPError:
         return None
 
-    key_b64 = descriptors[0].ntor_onion_key
-    padding = 4 - len(key_b64) % 4
-    if padding != 4:
-        key_b64 += "=" * padding
-    return base64.b64decode(key_b64)
+
+def _get_ntor_key(
+    relay: RouterStatusEntry, consensus: ConsensusDocument
+) -> tuple[bytes, str, str, bool] | None:
+    """
+    Get ntor-onion-key for a relay, using cache or fetching on-demand.
+
+    Args:
+        relay: Router status entry with fingerprint and microdesc_hash
+        consensus: Network consensus for finding V2Dir relays
+
+    Returns:
+        Tuple of (32-byte ntor key, source_name, source_type, from_cache) or None
+        source_type is "dircache", "authority", or "descriptor"
+        from_cache indicates if this was retrieved from local cache
+    """
+    # Try cached microdescriptor first
+    if relay.microdesc_hash:
+        cache_result = get_ntor_key_from_cache(relay.microdesc_hash)
+        if cache_result is not None:
+            ntor_key, source_name, source_type = cache_result
+            return ntor_key, source_name, source_type, True
+
+        # Try fetching from a V2Dir relay (directory cache)
+        v2dir_relay = _select_v2dir_relay(consensus, exclude=[relay.fingerprint])
+        if v2dir_relay:
+            result = _fetch_microdesc_from_relay(v2dir_relay, [relay.microdesc_hash])
+            if result:
+                md_content, used_relay = result
+                microdescriptors = MicrodescriptorParser.parse(md_content)
+                if microdescriptors:
+                    save_microdescriptors(microdescriptors, used_relay.nickname, "dircache")
+                    cache_result = get_ntor_key_from_cache(relay.microdesc_hash)
+                    if cache_result is not None:
+                        return cache_result[0], used_relay.nickname, "dircache", False
+
+        # Fall back to authority
+        try:
+            client = DirectoryClient()
+            md_content, authority = client.fetch_microdescriptors([relay.microdesc_hash])
+            microdescriptors = MicrodescriptorParser.parse(md_content)
+            if microdescriptors:
+                save_microdescriptors(microdescriptors, authority.nickname, "authority")
+                cache_result = get_ntor_key_from_cache(relay.microdesc_hash)
+                if cache_result is not None:
+                    return cache_result[0], authority.nickname, "authority", False
+        # pylint: disable-next=broad-exception-caught
+        except Exception:
+            pass  # Fall through to server descriptor
+
+    # Fall back to fetching server descriptor
+    desc_result = fetch_ntor_key(relay.fingerprint)
+    if desc_result is not None:
+        ntor_key, source_name = desc_result
+        return ntor_key, source_name, "descriptor", False
+    return None
 
 
 def cmd_circuit(args: argparse.Namespace) -> int:  # pylint: disable=too-many-return-statements
     """Build a circuit (1-3 hops), optionally open a stream and send data."""
     try:
         consensus = get_consensus()
-        client = DirectoryClient()
 
         num_hops = args.hops
 
@@ -452,20 +564,48 @@ def cmd_circuit(args: argparse.Namespace) -> int:  # pylint: disable=too-many-re
         if has_stream and num_hops == 3 and "Exit" not in relays[2].flags:
             print(f"Warning: {relays[2].nickname} does not have Exit flag", file=sys.stderr)
 
+        # Fetch descriptors for all relays
+        ntor_keys = []
+        for relay in relays:
+            result = _get_ntor_key(relay, consensus)
+            if result is None:
+                print(f"No ntor-onion-key for {relay.nickname}", file=sys.stderr)
+                return 1
+            ntor_key, source_name, source_type, from_cache = result
+            ntor_keys.append(ntor_key)
+
+            # Report source for each relay
+            if from_cache:
+                # Using locally cached microdescriptor
+                if source_type == "dircache":
+                    msg = f"Using {relay.nickname}'s microdescriptor "
+                    msg += f"from {source_name} (cache)"
+                    print(msg, file=sys.stderr)
+                elif source_type == "authority":
+                    msg = f"Using {relay.nickname}'s microdescriptor "
+                    msg += f"from {source_name} (authority)"
+                    print(msg, file=sys.stderr)
+                else:
+                    print(f"Using {relay.nickname}'s microdescriptor from cache", file=sys.stderr)
+            else:
+                # Freshly fetched
+                if source_type == "dircache":
+                    msg = f"Fetched {relay.nickname}'s microdescriptor "
+                    msg += f"from {source_name} (cache)"
+                    print(msg, file=sys.stderr)
+                elif source_type == "authority":
+                    msg = f"Fetched {relay.nickname}'s microdescriptor "
+                    msg += f"from {source_name} (authority)"
+                    print(msg, file=sys.stderr)
+                elif source_type == "descriptor":
+                    msg = f"Fetched {relay.nickname}'s descriptor "
+                    msg += f"from {source_name} (authority)"
+                    print(msg, file=sys.stderr)
+
         print(f"\nBuilding {num_hops}-hop circuit:")
         roles = ["Guard", "Middle", "Exit"]
         for i, r in enumerate(relays):
             print(f"  [{i+1}] {roles[i]}: {r.nickname} ({r.ip}:{r.orport})")
-
-        # Fetch descriptors for all relays
-        print("\nFetching relay descriptors...", file=sys.stderr)
-        ntor_keys = []
-        for relay in relays:
-            ntor_key = _get_ntor_key(client, relay.fingerprint)
-            if ntor_key is None:
-                print(f"No ntor-onion-key for {relay.nickname}", file=sys.stderr)
-                return 1
-            ntor_keys.append(ntor_key)
 
         # Connect to first relay
         first_relay = relays[0]
@@ -616,6 +756,9 @@ def main() -> int:
     # version command
     subparsers.add_parser("version", help="Display the torscope version")
 
+    # clear command
+    subparsers.add_parser("clear", help="Clear cached consensus")
+
     # authorities command
     subparsers.add_parser("authorities", help="List all directory authorities")
 
@@ -634,7 +777,7 @@ def main() -> int:
 
     # extra-info command
     extra_info_parser = subparsers.add_parser(
-        "extra-info", help="Show extra-info statistics for a relay"
+        "extra-info", help="Show extra-info for a specific relay"
     )
     extra_info_parser.add_argument(
         "query", metavar="nickname|fingerprint", help="Relay nickname or fingerprint"
@@ -669,6 +812,7 @@ def main() -> int:
     # Dispatch to command handler
     commands: dict[str, Callable[[argparse.Namespace], int]] = {
         "version": cmd_version,
+        "clear": cmd_clear,
         "authorities": cmd_authorities,
         "fallbacks": cmd_fallbacks,
         "relays": cmd_relays,

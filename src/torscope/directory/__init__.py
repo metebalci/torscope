@@ -30,6 +30,7 @@ from torscope.directory.models import (
     RouterStatusEntry,
     ServerDescriptor,
 )
+from torscope.directory.or_client import ORDirectoryClient
 
 __all__ = [
     "DirectoryAuthority",
@@ -43,6 +44,7 @@ __all__ = [
     "get_shuffled_fallbacks",
     "KeyCertificateParser",
     "DirectoryClient",
+    "ORDirectoryClient",
     "ConsensusParser",
     "ServerDescriptorParser",
     "ExtraInfoParser",

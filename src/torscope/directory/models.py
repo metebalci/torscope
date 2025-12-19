@@ -142,13 +142,35 @@ class ConsensusDocument:
     def is_valid(self) -> bool:
         """Check if consensus is currently valid."""
         now = datetime.now(UTC)
-        return self.valid_after <= now <= self.valid_until
+        # Ensure valid_after and valid_until are timezone-aware (they're UTC)
+        valid_after = (
+            self.valid_after.replace(tzinfo=UTC)
+            if self.valid_after.tzinfo is None
+            else self.valid_after
+        )
+        valid_until = (
+            self.valid_until.replace(tzinfo=UTC)
+            if self.valid_until.tzinfo is None
+            else self.valid_until
+        )
+        return valid_after <= now <= valid_until
 
     @property
     def is_fresh(self) -> bool:
         """Check if consensus is fresh."""
         now = datetime.now(UTC)
-        return self.valid_after <= now <= self.fresh_until
+        # Ensure datetimes are timezone-aware (they're UTC)
+        valid_after = (
+            self.valid_after.replace(tzinfo=UTC)
+            if self.valid_after.tzinfo is None
+            else self.valid_after
+        )
+        fresh_until = (
+            self.fresh_until.replace(tzinfo=UTC)
+            if self.fresh_until.tzinfo is None
+            else self.fresh_until
+        )
+        return valid_after <= now <= fresh_until
 
     @property
     def total_relays(self) -> int:

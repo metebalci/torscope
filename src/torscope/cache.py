@@ -1,19 +1,21 @@
 """
 Cache module for torscope.
 
-Provides caching for consensus documents in .torscope/ directory.
+Provides caching for consensus and microdescriptor documents in .torscope/ directory.
 """
 
+import base64
 import json
 from datetime import UTC, datetime
 from pathlib import Path
 
 from torscope.directory.consensus import ConsensusParser
-from torscope.directory.models import ConsensusDocument
+from torscope.directory.models import ConsensusDocument, Microdescriptor
 
 CACHE_DIR = Path(".torscope")
 CONSENSUS_FILE = CACHE_DIR / "consensus.bin"
 CONSENSUS_META = CACHE_DIR / "consensus.json"
+MICRODESC_FILE = CACHE_DIR / "microdescriptors.json"
 
 
 def _ensure_cache_dir() -> None:
@@ -21,13 +23,14 @@ def _ensure_cache_dir() -> None:
     CACHE_DIR.mkdir(exist_ok=True)
 
 
-def save_consensus(content: bytes, authority: str) -> None:
+def save_consensus(content: bytes, source: str, source_type: str = "authority") -> None:
     """
     Save consensus content to cache.
 
     Args:
         content: Raw consensus bytes
-        authority: Authority nickname the consensus was fetched from
+        source: Source name (authority/fallback/relay nickname)
+        source_type: Type of source ("authority", "fallback", or "cache")
     """
     _ensure_cache_dir()
 
@@ -36,18 +39,23 @@ def save_consensus(content: bytes, authority: str) -> None:
 
     # Save metadata
     meta = {
-        "authority": authority,
+        "source": source,
+        "source_type": source_type,
         "fetched_at": datetime.now(UTC).isoformat(),
     }
     CONSENSUS_META.write_text(json.dumps(meta))
 
 
-def load_consensus() -> ConsensusDocument | None:
+def load_consensus(allow_expired: bool = False) -> tuple[ConsensusDocument, dict[str, str]] | None:
     """
-    Load consensus from cache if valid.
+    Load consensus from cache.
+
+    Args:
+        allow_expired: If True, return expired consensus with expired=True in metadata
 
     Returns:
-        ConsensusDocument if cached and still valid, None otherwise
+        Tuple of (ConsensusDocument, metadata) if cached, None otherwise.
+        Metadata contains: source, source_type, expired
     """
     if not CONSENSUS_FILE.exists() or not CONSENSUS_META.exists():
         return None
@@ -56,13 +64,20 @@ def load_consensus() -> ConsensusDocument | None:
         # Load and parse
         content = CONSENSUS_FILE.read_bytes()
         meta = json.loads(CONSENSUS_META.read_text())
-        authority = meta.get("authority", "unknown")
 
-        consensus = ConsensusParser.parse(content, authority)
+        # Handle backwards compatibility (old cache format)
+        source = meta.get("source") or meta.get("authority", "unknown")
+        source_type = meta.get("source_type", "authority")
+
+        consensus = ConsensusParser.parse(content, source)
 
         # Check if still valid
         if consensus.is_valid:
-            return consensus
+            return consensus, {"source": source, "source_type": source_type, "expired": False}
+
+        # Return expired consensus if allowed
+        if allow_expired:
+            return consensus, {"source": source, "source_type": source_type, "expired": True}
 
         return None
 
@@ -95,3 +110,122 @@ def clear_cache() -> None:
         CONSENSUS_FILE.unlink()
     if CONSENSUS_META.exists():
         CONSENSUS_META.unlink()
+    if MICRODESC_FILE.exists():
+        MICRODESC_FILE.unlink()
+
+
+def save_microdescriptors(
+    microdescriptors: list[Microdescriptor],
+    source_name: str = "",
+    source_type: str = "",
+) -> None:
+    """
+    Save microdescriptors to cache.
+
+    Args:
+        microdescriptors: List of parsed Microdescriptor objects
+        source_name: Name of the source relay/authority
+        source_type: Type of source ("authority", "dircache", etc.)
+    """
+    _ensure_cache_dir()
+
+    # Load existing cache and merge
+    existing = _load_microdesc_cache()
+
+    # Add new microdescriptors (overwrite if exists)
+    for md in microdescriptors:
+        existing[md.digest] = {
+            "raw": md.raw_descriptor,
+            "ntor_key": md.onion_key_ntor,
+            "source_name": source_name,
+            "source_type": source_type,
+            "fetched_at": datetime.now(UTC).isoformat(),
+        }
+
+    # Save merged cache
+    MICRODESC_FILE.write_text(json.dumps(existing))
+
+
+def _load_microdesc_cache() -> dict[str, dict[str, str | None]]:
+    """Load microdescriptor cache file."""
+    if not MICRODESC_FILE.exists():
+        return {}
+    try:
+        result: dict[str, dict[str, str | None]] = json.loads(MICRODESC_FILE.read_text())
+        return result
+    # pylint: disable-next=broad-exception-caught
+    except Exception:
+        return {}
+
+
+def get_microdescriptor(digest: str) -> Microdescriptor | None:
+    """
+    Get a microdescriptor by its digest.
+
+    Args:
+        digest: Base64-encoded SHA256 digest (with or without padding)
+
+    Returns:
+        Microdescriptor if cached, None otherwise
+    """
+    cache = _load_microdesc_cache()
+
+    # Try both with and without trailing '='
+    digest_stripped = digest.rstrip("=")
+    digest_padded = digest_stripped + "=" * ((4 - len(digest_stripped) % 4) % 4)
+
+    entry = cache.get(digest_padded) or cache.get(digest_stripped)
+    if entry is None:
+        return None
+
+    # Reconstruct Microdescriptor from cached data
+    return Microdescriptor(
+        digest=digest_padded,
+        onion_key_ntor=entry.get("ntor_key"),
+        raw_descriptor=entry.get("raw") or "",
+    )
+
+
+def get_ntor_key_from_cache(digest: str) -> tuple[bytes, str, str] | None:
+    """
+    Get ntor-onion-key for a relay from cached microdescriptor.
+
+    Args:
+        digest: Base64-encoded microdescriptor digest
+
+    Returns:
+        Tuple of (32-byte ntor-onion-key, source_name, source_type) or None if not cached
+    """
+    cache = _load_microdesc_cache()
+
+    # Try both with and without trailing '='
+    digest_stripped = digest.rstrip("=")
+    digest_padded = digest_stripped + "=" * ((4 - len(digest_stripped) % 4) % 4)
+
+    entry = cache.get(digest_padded) or cache.get(digest_stripped)
+    if entry is None:
+        return None
+
+    ntor_key_b64 = entry.get("ntor_key")
+    if ntor_key_b64 is None:
+        return None
+
+    # Decode base64 key (add padding if needed)
+    padding = (4 - len(ntor_key_b64) % 4) % 4
+    if padding:
+        ntor_key_b64 += "=" * padding
+
+    try:
+        ntor_key = base64.b64decode(ntor_key_b64)
+    except ValueError:
+        return None
+
+    source_name = entry.get("source_name") or ""
+    source_type = entry.get("source_type") or ""
+
+    return ntor_key, source_name, source_type
+
+
+def get_cached_microdesc_count() -> int:
+    """Get number of cached microdescriptors."""
+    return len(_load_microdesc_cache())
