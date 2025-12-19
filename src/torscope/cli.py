@@ -6,12 +6,59 @@ Provides command-line tools for exploring the Tor network.
 
 import argparse
 import sys
+from typing import Optional
 
 from torscope import __version__
+from torscope.cache import load_consensus, save_consensus
 from torscope.directory.authority import DIRECTORY_AUTHORITIES, get_authority_by_nickname
 from torscope.directory.client import DirectoryClient
 from torscope.directory.consensus import ConsensusParser
 from torscope.directory.microdescriptor import MicrodescriptorParser
+from torscope.directory.models import ConsensusDocument
+
+
+def get_consensus(
+    authority_name: Optional[str] = None,
+    no_cache: bool = False,
+) -> ConsensusDocument:
+    """
+    Get consensus from cache or fetch from network.
+
+    Args:
+        authority_name: Specific authority to fetch from (None for random)
+        no_cache: If True, bypass cache and always fetch
+
+    Returns:
+        ConsensusDocument
+
+    Raises:
+        Exception: If fetch fails
+    """
+    # Try cache first (unless disabled or specific authority requested)
+    if not no_cache and authority_name is None:
+        cached = load_consensus()
+        if cached is not None:
+            print("Using cached consensus", file=sys.stderr)
+            return cached
+
+    # Fetch from network
+    client = DirectoryClient()
+    authority = None
+    if authority_name:
+        authority = get_authority_by_nickname(authority_name)
+        if authority is None:
+            raise ValueError(f"Unknown authority '{authority_name}'")
+
+    source = authority.nickname if authority else "random authority"
+    print(f"Fetching consensus from {source}...", file=sys.stderr)
+    content, used_authority = client.fetch_consensus(authority, "microdesc")
+    consensus = ConsensusParser.parse(content, used_authority.nickname)
+    print(f"Fetched {consensus.total_relays:,} relays", file=sys.stderr)
+
+    # Save to cache
+    save_consensus(content, used_authority.nickname)
+
+    return consensus
 
 
 def cmd_version(args: argparse.Namespace) -> int:  # pylint: disable=unused-argument
@@ -55,9 +102,13 @@ def cmd_fetch_consensus(args: argparse.Namespace) -> int:
         print("Parsing consensus...")
         consensus = ConsensusParser.parse(content, used_authority.nickname)
 
+        # Save to cache (only microdesc type)
+        if args.type == "microdesc":
+            save_consensus(content, used_authority.nickname)
+            print("Cached to .torscope/")
+
         # Display summary
-        print("Parsed successfully\n")
-        print("Consensus Information:")
+        print("\nConsensus Information:")
         print(f"  Valid After:  {consensus.valid_after} UTC")
         print(f"  Fresh Until:  {consensus.fresh_until} UTC")
         print(f"  Valid Until:  {consensus.valid_until} UTC")
@@ -80,23 +131,8 @@ def cmd_fetch_consensus(args: argparse.Namespace) -> int:
 
 def cmd_list_relays(args: argparse.Namespace) -> int:
     """List relays from network consensus."""
-    client = DirectoryClient()
-
-    # Get authority if specified
-    authority = None
-    if args.authority:
-        authority = get_authority_by_nickname(args.authority)
-        if authority is None:
-            print(f"Error: Unknown authority '{args.authority}'", file=sys.stderr)
-            return 1
-
     try:
-        # Fetch and parse consensus
-        source = authority.nickname if authority else "random authority"
-        print(f"Fetching consensus from {source}...", file=sys.stderr)
-        content, used_authority = client.fetch_consensus(authority, "microdesc")
-        consensus = ConsensusParser.parse(content, used_authority.nickname)
-        print(f"Fetched {consensus.total_relays:,} relays\n", file=sys.stderr)
+        consensus = get_consensus(args.authority, args.no_cache)
 
         # Filter relays
         relays = consensus.routers
@@ -108,7 +144,7 @@ def cmd_list_relays(args: argparse.Namespace) -> int:
         relays = relays[: args.limit]
 
         # Display header
-        print(f"Relays (showing {len(relays)} of {total:,}):\n")
+        print(f"\nRelays (showing {len(relays)} of {total:,}):\n")
         print(f"{'Nickname':<20} {'Fingerprint':<10} {'Address':<22} {'Bandwidth':<12} {'Flags'}")
         print("-" * 100)
 
@@ -133,21 +169,8 @@ def cmd_list_relays(args: argparse.Namespace) -> int:
 
 def cmd_fetch_microdescriptors(args: argparse.Namespace) -> int:
     """Fetch microdescriptors for relays."""
-    client = DirectoryClient()
-
-    # Get authority if specified
-    authority = None
-    if args.authority:
-        authority = get_authority_by_nickname(args.authority)
-        if authority is None:
-            print(f"Error: Unknown authority '{args.authority}'", file=sys.stderr)
-            return 1
-
     try:
-        # Fetch and parse consensus first
-        print("Fetching consensus...", file=sys.stderr)
-        content, used_authority = client.fetch_consensus(authority, "microdesc")
-        consensus = ConsensusParser.parse(content, used_authority.nickname)
+        consensus = get_consensus(args.authority, args.no_cache)
 
         # Filter relays
         relays = consensus.routers
@@ -165,6 +188,7 @@ def cmd_fetch_microdescriptors(args: argparse.Namespace) -> int:
         # Collect hashes
         hashes = [r.microdesc_hash for r in relays if r.microdesc_hash]
 
+        client = DirectoryClient()
         print(f"Fetching {len(hashes)} microdescriptors...", file=sys.stderr)
         md_content, md_authority = client.fetch_microdescriptors(hashes)
         print(f"Downloaded {len(md_content):,} bytes from {md_authority.nickname}", file=sys.stderr)
@@ -230,6 +254,7 @@ def main() -> int:
     )
     list_relays.add_argument("--flags", metavar="FLAGS", help="Filter by flags (comma-separated)")
     list_relays.add_argument("--authority", metavar="NAME", help="Specific authority to fetch from")
+    list_relays.add_argument("--no-cache", action="store_true", help="Bypass cache, fetch fresh")
 
     # fetch-microdescriptors command
     fetch_mds = subparsers.add_parser(
@@ -242,6 +267,7 @@ def main() -> int:
         "--flags", metavar="FLAGS", help="Filter relays by flags (comma-separated)"
     )
     fetch_mds.add_argument("--authority", metavar="NAME", help="Specific authority to fetch from")
+    fetch_mds.add_argument("--no-cache", action="store_true", help="Bypass cache, fetch fresh")
 
     args = parser.parse_args()
 
