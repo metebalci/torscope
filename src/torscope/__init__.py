@@ -1,8 +1,8 @@
 """
-torman - A tool for exploring and getting information about the Tor network.
+torscope - A tool for exploring and getting information about the Tor network.
 
-Torman provides a CLI for fetching and analyzing Tor network directory information,
+Provides a CLI for fetching and analyzing Tor network directory information,
 including consensus documents, relay details, and network statistics.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
