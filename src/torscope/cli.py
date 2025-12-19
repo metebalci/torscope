@@ -10,7 +10,7 @@ from typing import Optional
 
 from torscope import __version__
 from torscope.cache import load_consensus, save_consensus
-from torscope.directory.authority import DIRECTORY_AUTHORITIES, get_authority_by_nickname
+from torscope.directory.authority import get_authorities, get_authority_by_nickname
 from torscope.directory.client import DirectoryClient
 from torscope.directory.consensus import ConsensusParser
 from torscope.directory.microdescriptor import MicrodescriptorParser
@@ -70,7 +70,7 @@ def cmd_version(args: argparse.Namespace) -> int:  # pylint: disable=unused-argu
 def cmd_authorities(args: argparse.Namespace) -> int:  # pylint: disable=unused-argument
     """List all directory authorities."""
     print("Directory Authorities:\n")
-    for i, auth in enumerate(DIRECTORY_AUTHORITIES, 1):
+    for i, auth in enumerate(get_authorities(), 1):
         print(f"  [{i}] {auth.nickname}")
         print(f"      Address: {auth.address}")
         print(f"      Identity: {auth.v3ident}")

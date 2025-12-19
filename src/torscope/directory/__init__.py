@@ -1,8 +1,8 @@
 """Directory protocol implementation for Tor."""
 
 from torscope.directory.authority import (
-    DIRECTORY_AUTHORITIES,
     DirectoryAuthority,
+    get_authorities,
     get_authority_by_nickname,
     get_random_authority,
 )
@@ -20,8 +20,8 @@ from torscope.directory.models import (
 )
 
 __all__ = [
-    "DIRECTORY_AUTHORITIES",
     "DirectoryAuthority",
+    "get_authorities",
     "get_authority_by_nickname",
     "get_random_authority",
     "KeyCertificateParser",

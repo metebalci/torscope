@@ -51,3 +51,6 @@ docs/
 
 # claude code
 CLAUDE.md
+
+# Cache directory
+.torscope/
