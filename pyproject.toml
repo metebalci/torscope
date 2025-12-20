@@ -27,6 +27,7 @@ keywords = ["tor", "onion", "routing", "privacy", "anonymity", "network", "infor
 dependencies = [
     "httpx>=0.25.0",
     "cryptography>=41.0.0",
+    "pynacl>=1.5.0",
 ]
 
 [project.optional-dependencies]
@@ -118,6 +119,12 @@ disable = [
     "R0917",  # too-many-positional-arguments (complex functions)
     "R1702",  # too-many-nested-blocks (parser logic)
     "C0302",  # too-many-lines (large modules are valid)
+    "C0103",  # invalid-name (module-level mutable caches)
+    "C0415",  # import-outside-toplevel (lazy imports for optional deps)
+    "W0511",  # fixme (TODO comments are fine)
+    "W0603",  # global-statement (caching pattern)
+    "W0621",  # redefined-outer-name (intentional reimport)
+    "W0404",  # reimported (intentional in crypto module)
     "E0401",  # import-error (pylint environment issue)
 ]
 

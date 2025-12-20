@@ -34,6 +34,7 @@ class RouterStatusEntry:
     unmeasured: bool = False  # w line (Unmeasured=1)
     exit_policy: str | None = None  # p line
     microdesc_hash: str | None = None  # m line (base64)
+    ed25519_identity: str | None = None  # id ed25519 (base64)
 
     @property
     def fingerprint(self) -> str:

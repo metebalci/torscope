@@ -5,6 +5,7 @@ This module implements the Tor OR protocol for building circuits
 and communicating with relays.
 """
 
+from torscope.onion.address import OnionAddress, get_current_time_period, get_time_period_info
 from torscope.onion.cell import (
     HTYPE_NTOR,
     AuthChallengeCell,
@@ -39,6 +40,10 @@ from torscope.onion.relay import (
 )
 
 __all__ = [
+    # Address
+    "OnionAddress",
+    "get_current_time_period",
+    "get_time_period_info",
     # Cells
     "Cell",
     "CellCommand",

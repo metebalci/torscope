@@ -1,6 +1,5 @@
 """Tests for microdescriptor parser."""
 
-
 from torscope.directory.microdescriptor import MicrodescriptorParser
 from torscope.directory.models import Microdescriptor
 
@@ -148,8 +147,9 @@ class TestMicrodescriptorParser:
         mds = MicrodescriptorParser.parse(SAMPLE_MICRODESCRIPTOR)
         md = mds[0]
         assert md.digest is not None
-        # Base64-encoded SHA256 should be 44 characters (with padding)
-        assert len(md.digest) == 44
+        # Base64-encoded SHA256 is 43 characters without padding (Tor convention)
+        # or 44 characters with padding
+        assert len(md.digest) in (43, 44)
 
     def test_raw_descriptor_stored(self):
         """Test that raw descriptor is stored."""

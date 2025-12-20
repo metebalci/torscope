@@ -27,9 +27,12 @@ from torscope.directory.consensus import ConsensusParser
 from torscope.directory.descriptor import ServerDescriptorParser
 from torscope.directory.extra_info import ExtraInfoParser
 from torscope.directory.fallback import get_fallbacks
+from torscope.directory.hs_descriptor import fetch_hs_descriptor, parse_hs_descriptor
+from torscope.directory.hsdir import HSDirectoryRing
 from torscope.directory.microdescriptor import MicrodescriptorParser
 from torscope.directory.models import ConsensusDocument, RouterStatusEntry
 from torscope.directory.or_client import fetch_ntor_key
+from torscope.onion.address import OnionAddress, get_current_time_period, get_time_period_info
 from torscope.onion.circuit import Circuit
 from torscope.onion.connection import RelayConnection
 from torscope.path import PathSelector
@@ -916,6 +919,151 @@ def cmd_resolve(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_hidden_service(args: argparse.Namespace) -> int:
+    """Access a Tor hidden service (v3 onion address)."""
+    try:
+        # Parse the onion address
+        try:
+            onion = OnionAddress.parse(args.address)
+        except ValueError as e:
+            print(f"Invalid onion address: {e}", file=sys.stderr)
+            return 1
+
+        # Display parsed address info
+        print(f"Onion Address: {onion.address}")
+        print(f"  Version: {onion.version}")
+        print(f"  Public key: {onion.public_key.hex()}")
+        print(f"  Checksum: {onion.checksum.hex()}")
+
+        # Time period info
+        time_period = get_current_time_period()
+        period_info = get_time_period_info()
+        print(f"\nTime Period: {time_period}")
+        print(f"  Remaining: {period_info['remaining_minutes']:.1f} minutes")
+
+        # Get consensus for HSDir selection
+        consensus = get_consensus()
+
+        # Pre-fetch Ed25519 identities for all HSDir relays (only do this once)
+        print("\nFetching HSDir Ed25519 identities...")
+        ed25519_map = HSDirectoryRing.fetch_ed25519_map(consensus)
+        print(f"Found {len(ed25519_map)} Ed25519 identities")
+
+        # Decode SRV values from consensus
+        import base64
+
+        srv_current = None  # SRV#(current_period)
+        srv_previous = None  # SRV#(current_period-1)
+
+        if consensus.shared_rand_current:
+            srv_current = base64.b64decode(consensus.shared_rand_current[1])
+        if consensus.shared_rand_previous:
+            srv_previous = base64.b64decode(consensus.shared_rand_previous[1])
+
+        if getattr(args, "debug", False):
+            srv_cur_hex = srv_current.hex() if srv_current else "None"
+            srv_prev_hex = srv_previous.hex() if srv_previous else "None"
+            print(f"\n[debug] SRV current (SRV#{time_period}): {srv_cur_hex}")
+            print(f"[debug] SRV previous (SRV#{time_period-1}): {srv_prev_hex}")
+
+        # Empirically verified: Tor uses shared_rand_current for hsdir_index computation.
+        # The blinded key is derived from the time period (SRV is not used in blinding).
+        # The hsdir_index uses: H("node-idx" | ed25519_id | SRV_current | period | length)
+
+        descriptor_text = None
+        hsdir_used = None
+        tp = time_period
+
+        if srv_current is None:
+            print("Error: No current SRV in consensus (needed for HSDir ring)", file=sys.stderr)
+            return 1
+
+        # Compute blinded key for this time period (no SRV needed)
+        blinded_key = onion.compute_blinded_key(tp)
+        print(f"\nBlinded Key (period {tp}): {blinded_key.hex()}")
+
+        # Build HSDir hashring using shared_rand_current
+        # use_second_srv=False means use shared_rand_current
+        hsdir_ring = HSDirectoryRing(consensus, tp, use_second_srv=False, ed25519_map=ed25519_map)
+
+        if hsdir_ring.size == 0:
+            print("Error: No HSDirs in ring", file=sys.stderr)
+            return 1
+
+        print(f"\nHSDir Ring (using SRV current, period {tp}): {hsdir_ring.size} relays")
+
+        # Find responsible HSDirs (or use manually specified one)
+        if args.hsdir:
+            # Manual HSDir selection
+            hsdir = _find_router(consensus, args.hsdir.strip())
+            if hsdir is None:
+                print(f"HSDir not found: {args.hsdir}", file=sys.stderr)
+                return 1
+            if "HSDir" not in hsdir.flags:
+                print(f"Warning: {hsdir.nickname} does not have HSDir flag")
+            hsdirs = [hsdir]
+        else:
+            # Automatic HSDir selection
+            hsdirs = hsdir_ring.get_responsible_hsdirs(blinded_key)
+            print(f"Responsible HSDirs ({len(hsdirs)}):")
+            for i, hsdir in enumerate(hsdirs[:3]):  # Show first 3
+                print(f"  [{i+1}] {hsdir.nickname} ({hsdir.ip}:{hsdir.orport})")
+            if len(hsdirs) > 3:
+                print(f"  ... and {len(hsdirs) - 3} more")
+
+        # Fetch descriptor from HSDirs (try first 6)
+        for hsdir in hsdirs[:6]:
+            print(f"\nFetching descriptor from {hsdir.nickname}...")
+            result = fetch_hs_descriptor(
+                consensus=consensus,
+                hsdir=hsdir,
+                blinded_key=blinded_key,
+                timeout=args.timeout,
+                use_3hop_circuit=not getattr(args, "direct", False),
+                verbose=getattr(args, "debug", False),
+            )
+            if result:
+                descriptor_text, hsdir_used = result
+                print(f"  Descriptor fetched from {hsdir_used.nickname}")
+                break
+            print(f"  Failed to fetch from {hsdir.nickname}")
+
+        if descriptor_text is None:
+            print("\nFailed to fetch descriptor from any HSDir", file=sys.stderr)
+            return 1
+
+        # Parse the descriptor
+        try:
+            descriptor = parse_hs_descriptor(descriptor_text)
+        except ValueError as e:
+            print(f"\nFailed to parse descriptor: {e}", file=sys.stderr)
+            return 1
+
+        # Display descriptor info
+        print("\nDescriptor Info:")
+        print(f"  Version: {descriptor.outer.version}")
+        print(f"  Lifetime: {descriptor.outer.descriptor_lifetime} minutes")
+        print(f"  Revision: {descriptor.outer.revision_counter}")
+        print(f"  Signing cert: {len(descriptor.outer.signing_key_cert)} bytes")
+        print(f"  Superencrypted: {len(descriptor.outer.superencrypted_blob)} bytes")
+        print(f"  Signature: {len(descriptor.outer.signature)} bytes")
+
+        if not descriptor.decrypted:
+            print(f"\n[Descriptor decryption: {descriptor.decryption_error}]")
+
+        # TODO: Rendezvous (if --connect)
+        if args.connect:
+            print("\n[Rendezvous protocol not yet implemented]")
+
+        return 0
+
+    # pylint: disable-next=broad-exception-caught
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        traceback.print_exc()
+        return 1
+
+
 class _SubcommandHelpFormatter(argparse.RawDescriptionHelpFormatter):
     """Custom formatter to clean up subcommand help display."""
 
@@ -1030,6 +1178,29 @@ def main() -> int:
     )
     resolve_parser.add_argument("hostname", metavar="HOSTNAME", help="Hostname to resolve")
 
+    # hidden-service command
+    hs_parser = subparsers.add_parser(
+        "hidden-service", help="Access a Tor hidden service (v3 onion)"
+    )
+    hs_parser.add_argument("address", metavar="ADDRESS", help="Onion address (56 chars)")
+    hs_parser.add_argument(
+        "--connect", type=int, metavar="PORT", help="Connect to hidden service on PORT"
+    )
+    hs_parser.add_argument(
+        "--data", metavar="DATA", help="ASCII data to send (use \\r\\n for line breaks)"
+    )
+    hs_parser.add_argument(
+        "--timeout", type=float, default=30.0, help="Connection timeout (default: 30s)"
+    )
+    hs_parser.add_argument(
+        "--auth-key", metavar="BASE64", help="Client authorization key for private HS"
+    )
+    hs_parser.add_argument("--hsdir", metavar="FINGERPRINT", help="Manually specify HSDir to use")
+    hs_parser.add_argument(
+        "--direct", action="store_true", help="Connect directly to HSDir (1-hop, less privacy)"
+    )
+    hs_parser.add_argument("--debug", action="store_true", help="Enable debug output")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -1048,6 +1219,7 @@ def main() -> int:
         "path": cmd_path,
         "circuit": cmd_circuit,
         "resolve": cmd_resolve,
+        "hidden-service": cmd_hidden_service,
     }
 
     try:

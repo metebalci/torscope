@@ -103,6 +103,16 @@ class ConsensusParser:
                         key, value = param.split("=", 1)
                         consensus.params[key] = int(value)
 
+            elif keyword == "shared-rand-current-value":
+                # shared-rand-current-value NumReveals Value
+                if len(parts) >= 3:
+                    consensus.shared_rand_current = (int(parts[1]), parts[2])
+
+            elif keyword == "shared-rand-previous-value":
+                # shared-rand-previous-value NumReveals Value
+                if len(parts) >= 3:
+                    consensus.shared_rand_previous = (int(parts[1]), parts[2])
+
             # Authority section
             elif keyword == "dir-source":
                 # dir-source nickname identity hostname IP dirport orport
@@ -186,6 +196,11 @@ class ConsensusParser:
                     # Microdescriptor hash
                     if len(parts) >= 2:
                         current_router.microdesc_hash = parts[1]
+
+                elif keyword == "id":
+                    # Identity keys (id ed25519 <base64>)
+                    if len(parts) >= 3 and parts[1] == "ed25519":
+                        current_router.ed25519_identity = parts[2]
 
             # Footer (these must be checked even when current_router is set)
             if keyword == "bandwidth-weights":

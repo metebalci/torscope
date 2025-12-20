@@ -2,16 +2,19 @@
 
 This module provides cryptographic functions for:
 - RSA signature verification
+- Ed25519 signature verification
 - Key fingerprint computation
-- Hash functions
+- Hash functions (SHA1, SHA256, SHA3-256, SHAKE-256)
 """
 
 import base64
 import hashlib
 from typing import Optional
 
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
 
 
@@ -235,3 +238,89 @@ def extract_signed_portion(
     end_idx = space_idx + 1
     signed_text = consensus_text[start_idx:end_idx]
     return signed_text.encode("utf-8")
+
+
+# =============================================================================
+# Ed25519 Functions
+# =============================================================================
+
+
+def load_ed25519_public_key(key_bytes: bytes) -> Ed25519PublicKey:
+    """
+    Load an Ed25519 public key from raw bytes.
+
+    Args:
+        key_bytes: 32-byte Ed25519 public key
+
+    Returns:
+        Ed25519PublicKey object
+
+    Raises:
+        ValueError: If the key cannot be parsed
+    """
+    if len(key_bytes) != 32:
+        raise ValueError(f"Ed25519 public key must be 32 bytes, got {len(key_bytes)}")
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    return Ed25519PublicKey.from_public_bytes(key_bytes)
+
+
+def verify_ed25519_signature(
+    public_key: bytes | Ed25519PublicKey,
+    signature: bytes,
+    data: bytes,
+) -> bool:
+    """
+    Verify an Ed25519 signature.
+
+    Args:
+        public_key: 32-byte Ed25519 public key or Ed25519PublicKey object
+        signature: 64-byte Ed25519 signature
+        data: The data that was signed
+
+    Returns:
+        True if signature is valid, False otherwise
+    """
+    try:
+        if isinstance(public_key, bytes):
+            key = load_ed25519_public_key(public_key)
+        else:
+            key = public_key
+
+        key.verify(signature, data)
+        return True
+    except (InvalidSignature, ValueError):
+        return False
+
+
+# =============================================================================
+# SHA3 and SHAKE Functions
+# =============================================================================
+
+
+def sha3_256(data: bytes) -> bytes:
+    """
+    Compute SHA3-256 hash.
+
+    Args:
+        data: Data to hash
+
+    Returns:
+        32-byte hash digest
+    """
+    return hashlib.sha3_256(data).digest()
+
+
+def shake256(data: bytes, length: int) -> bytes:
+    """
+    Compute SHAKE-256 extendable output.
+
+    Args:
+        data: Data to hash
+        length: Output length in bytes
+
+    Returns:
+        Hash digest of specified length
+    """
+    return hashlib.shake_256(data).digest(length)

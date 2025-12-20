@@ -17,6 +17,10 @@ CONSENSUS_FILE = CACHE_DIR / "consensus.bin"
 CONSENSUS_META = CACHE_DIR / "consensus.json"
 MICRODESC_FILE = CACHE_DIR / "microdescriptors.json"
 
+# In-memory cache for microdescriptors (avoid repeated disk reads)
+_microdesc_cache: dict[str, dict[str, str | None]] | None = None
+_microdesc_cache_mtime: float = 0.0
+
 
 def _ensure_cache_dir() -> None:
     """Create cache directory if it doesn't exist."""
@@ -137,25 +141,42 @@ def save_microdescriptors(
         existing[md.digest] = {
             "raw": md.raw_descriptor,
             "ntor_key": md.onion_key_ntor,
+            "ed25519_identity": md.ed25519_identity,
             "source_name": source_name,
             "source_type": source_type,
             "fetched_at": datetime.now(UTC).isoformat(),
         }
 
-    # Save merged cache
+    # Save merged cache and invalidate in-memory cache
+    global _microdesc_cache, _microdesc_cache_mtime  # noqa: PLW0603
     MICRODESC_FILE.write_text(json.dumps(existing))
+    _microdesc_cache = existing  # Update in-memory cache directly
+    _microdesc_cache_mtime = MICRODESC_FILE.stat().st_mtime
 
 
 def _load_microdesc_cache() -> dict[str, dict[str, str | None]]:
-    """Load microdescriptor cache file."""
+    """Load microdescriptor cache file with in-memory caching."""
+    global _microdesc_cache, _microdesc_cache_mtime  # noqa: PLW0603
+
     if not MICRODESC_FILE.exists():
-        return {}
+        _microdesc_cache = {}
+        return _microdesc_cache
+
     try:
+        # Check if file has been modified since last read
+        current_mtime = MICRODESC_FILE.stat().st_mtime
+        if _microdesc_cache is not None and current_mtime == _microdesc_cache_mtime:
+            return _microdesc_cache
+
+        # Reload from disk
         result: dict[str, dict[str, str | None]] = json.loads(MICRODESC_FILE.read_text())
+        _microdesc_cache = result
+        _microdesc_cache_mtime = current_mtime
         return result
     # pylint: disable-next=broad-exception-caught
     except Exception:
-        return {}
+        _microdesc_cache = {}
+        return _microdesc_cache
 
 
 def get_microdescriptor(digest: str) -> Microdescriptor | None:
@@ -182,6 +203,7 @@ def get_microdescriptor(digest: str) -> Microdescriptor | None:
     return Microdescriptor(
         digest=digest_padded,
         onion_key_ntor=entry.get("ntor_key"),
+        ed25519_identity=entry.get("ed25519_identity"),
         raw_descriptor=entry.get("raw") or "",
     )
 

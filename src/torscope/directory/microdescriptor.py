@@ -83,9 +83,9 @@ class MicrodescriptorParser:
         if not raw_descriptor.endswith("\n"):
             raw_descriptor += "\n"
 
-        # Compute SHA256 digest (base64-encoded)
+        # Compute SHA256 digest (base64-encoded without padding, to match consensus format)
         digest_bytes = hashlib.sha256(raw_descriptor.encode("utf-8")).digest()
-        digest = base64.b64encode(digest_bytes).decode("ascii")
+        digest = base64.b64encode(digest_bytes).decode("ascii").rstrip("=")
 
         # Initialize fields
         onion_key_rsa: str | None = None
