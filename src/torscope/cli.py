@@ -32,6 +32,7 @@ from torscope.directory.models import ConsensusDocument, RouterStatusEntry
 from torscope.directory.or_client import fetch_ntor_key
 from torscope.onion.circuit import Circuit
 from torscope.onion.connection import RelayConnection
+from torscope.path import PathSelector
 
 
 def verify_consensus_signatures(consensus: ConsensusDocument) -> tuple[int, int]:
@@ -401,6 +402,87 @@ def cmd_extra_info(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_path(args: argparse.Namespace) -> int:
+    """Select a path through the Tor network using bandwidth-weighted selection."""
+    try:
+        consensus = get_consensus()
+
+        num_hops = args.hops
+        target_port = args.port
+
+        # Create path selector
+        selector = PathSelector(consensus=consensus)
+
+        # Resolve pre-selected routers if specified
+        exit_spec = vars(args).get("exit")  # 'exit' is a builtin name
+        guard = None
+        middle = None
+        exit_router = None
+
+        if args.guard:
+            guard = _find_router(consensus, args.guard.strip())
+            if guard is None:
+                print(f"Guard router not found: {args.guard}", file=sys.stderr)
+                return 1
+
+        if args.middle and num_hops >= 3:
+            middle = _find_router(consensus, args.middle.strip())
+            if middle is None:
+                print(f"Middle router not found: {args.middle}", file=sys.stderr)
+                return 1
+
+        if exit_spec and num_hops >= 2:
+            exit_router = _find_router(consensus, exit_spec.strip())
+            if exit_router is None:
+                print(f"Exit router not found: {exit_spec}", file=sys.stderr)
+                return 1
+
+        # Select path
+        try:
+            path = selector.select_path(
+                num_hops=num_hops,
+                target_port=target_port,
+                guard=guard,
+                middle=middle,
+                exit_router=exit_router,
+            )
+        except ValueError as e:
+            print(f"Path selection failed: {e}", file=sys.stderr)
+            return 1
+
+        # Display path information
+        print(f"\nSelected {path.hops}-hop path:")
+        print("=" * 70)
+
+        for role, router in zip(path.roles, path.routers, strict=True):
+            bw_mbps = (router.bandwidth or 0) / 1_000_000
+
+            print(f"\n  {role}: {router.nickname}")
+            print(f"    Fingerprint: {router.fingerprint}")
+            print(f"    Address:     {router.ip}:{router.orport}")
+            print(f"    Bandwidth:   {bw_mbps:.2f} MB/s")
+            print(f"    Flags:       {', '.join(router.flags)}")
+            if router.exit_policy:
+                print(f"    Exit Policy: {router.exit_policy}")
+
+        # Summary
+        print("\n" + "=" * 70)
+        min_bw = min((r.bandwidth or 0) for r in path.routers)
+        print(f"Path bandwidth (bottleneck): {min_bw / 1_000_000:.2f} MB/s")
+
+        # Show as single line for easy copying
+        print(f"\nPath: {' -> '.join(r.nickname for r in path.routers)}")
+
+        return 0
+
+    # pylint: disable-next=broad-exception-caught
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        if args.debug if hasattr(args, "debug") else False:
+            traceback.print_exc()
+        return 1
+
+
 def _find_router(consensus: ConsensusDocument, query: str) -> RouterStatusEntry | None:
     """Find router by fingerprint or nickname."""
     query_upper = query.upper()
@@ -410,62 +492,6 @@ def _find_router(consensus: ConsensusDocument, query: str) -> RouterStatusEntry 
         if r.nickname.upper() == query_upper:
             return r
     return None
-
-
-def _select_random_router(
-    consensus: ConsensusDocument,
-    role: str,
-    exclude: list[str] | None = None,
-    port: int | None = None,
-) -> RouterStatusEntry | None:
-    """
-    Select a random router appropriate for a circuit role.
-
-    Args:
-        consensus: The consensus document
-        role: One of "guard", "middle", "exit"
-        exclude: List of fingerprints to exclude (avoid same router twice)
-        port: Target port (for exit router selection, filters by exit policy)
-
-    Returns:
-        A random router suitable for the role, or None if none found
-    """
-    exclude_set = set(exclude) if exclude else set()
-
-    if role == "guard":
-        # Guards need Guard, Stable, and Fast flags
-        candidates = [
-            r
-            for r in consensus.routers
-            if r.has_flag("Guard")
-            and r.has_flag("Stable")
-            and r.has_flag("Fast")
-            and r.fingerprint not in exclude_set
-        ]
-    elif role == "exit":
-        # Exits need Exit, Stable, and Fast flags
-        # Also filter by exit policy if port is specified
-        candidates = [
-            r
-            for r in consensus.routers
-            if r.has_flag("Exit")
-            and r.has_flag("Stable")
-            and r.has_flag("Fast")
-            and r.fingerprint not in exclude_set
-            and (port is None or r.allows_port(port))
-        ]
-    else:  # middle
-        # Middle routers need Stable and Fast flags
-        candidates = [
-            r
-            for r in consensus.routers
-            if r.has_flag("Stable") and r.has_flag("Fast") and r.fingerprint not in exclude_set
-        ]
-
-    if not candidates:
-        return None
-
-    return random.choice(candidates)
 
 
 def _select_v2dir_router(
@@ -572,50 +598,55 @@ def cmd_circuit(args: argparse.Namespace) -> int:  # pylint: disable=too-many-re
         consensus = get_consensus()
 
         num_hops = args.hops
-
-        # Build router specs based on number of hops
-        exit_spec = vars(args)["exit"]  # 'exit' is a builtin name
-        all_specs = [
-            ("guard", args.guard),
-            ("middle", args.middle),
-            ("exit", exit_spec),
-        ]
-        router_specs = all_specs[:num_hops]
-
-        # Resolve routers (None means random selection)
-        routers = []
-        used_fingerprints: list[str] = []
         target_port = args.port  # For exit policy matching
 
-        for role, query in router_specs:
-            if query is None:
-                # Random selection based on role
-                # Pass target port for exit router selection
-                port_filter = target_port if role == "exit" else None
-                router = _select_random_router(consensus, role, used_fingerprints, port_filter)
-                if router is None:
-                    if role == "exit" and target_port:
-                        print(
-                            f"No suitable {role} router found for port {target_port}",
-                            file=sys.stderr,
-                        )
-                    else:
-                        print(f"No suitable {role} router found", file=sys.stderr)
-                    return 1
-            else:
-                router = _find_router(consensus, query.strip())
-                if router is None:
-                    print(f"Router not found: {query}", file=sys.stderr)
-                    return 1
-            routers.append(router)
-            used_fingerprints.append(router.fingerprint)
+        # Resolve pre-specified routers
+        exit_spec = vars(args).get("exit")  # 'exit' is a builtin name
+        guard = None
+        middle = None
+        exit_router = None
+
+        if args.guard:
+            guard = _find_router(consensus, args.guard.strip())
+            if guard is None:
+                print(f"Guard router not found: {args.guard}", file=sys.stderr)
+                return 1
+
+        if args.middle and num_hops >= 3:
+            middle = _find_router(consensus, args.middle.strip())
+            if middle is None:
+                print(f"Middle router not found: {args.middle}", file=sys.stderr)
+                return 1
+
+        if exit_spec and num_hops >= 2:
+            exit_router = _find_router(consensus, exit_spec.strip())
+            if exit_router is None:
+                print(f"Exit router not found: {exit_spec}", file=sys.stderr)
+                return 1
+
+        # Use PathSelector for bandwidth-weighted selection with exclusions
+        selector = PathSelector(consensus=consensus)
+        try:
+            path = selector.select_path(
+                num_hops=num_hops,
+                target_port=target_port,
+                guard=guard,
+                middle=middle,
+                exit_router=exit_router,
+            )
+        except ValueError as e:
+            print(f"Path selection failed: {e}", file=sys.stderr)
+            return 1
+
+        routers = path.routers
+        roles = path.roles
 
         # Check if stream requested
         has_stream = args.target is not None and args.port is not None
 
-        # Warn if exit doesn't have Exit flag (only for 3-hop with stream)
-        if has_stream and num_hops == 3 and "Exit" not in routers[2].flags:
-            print(f"Warning: {routers[2].nickname} does not have Exit flag", file=sys.stderr)
+        # Warn if exit doesn't have Exit flag (only for multi-hop with stream)
+        if has_stream and path.exit is not None and "Exit" not in path.exit.flags:
+            print(f"Warning: {path.exit.nickname} does not have Exit flag", file=sys.stderr)
 
         # Fetch descriptors for all routers
         ntor_keys = []
@@ -656,9 +687,8 @@ def cmd_circuit(args: argparse.Namespace) -> int:  # pylint: disable=too-many-re
                     print(msg, file=sys.stderr)
 
         print(f"\nBuilding {num_hops}-hop circuit:")
-        roles = ["Guard", "Middle", "Exit"]
-        for i, r in enumerate(routers):
-            print(f"  [{i+1}] {roles[i]}: {r.nickname} ({r.ip}:{r.orport})")
+        for i, (role, r) in enumerate(zip(roles, routers, strict=True)):
+            print(f"  [{i+1}] {role}: {r.nickname} ({r.ip}:{r.orport})")
 
         # Connect to first router
         first_router = routers[0]
@@ -772,17 +802,15 @@ def cmd_resolve(args: argparse.Namespace) -> int:
     try:
         consensus = get_consensus()
 
-        # Build 3-hop circuit for DNS resolution
-        routers = []
-        used_fingerprints: list[str] = []
+        # Build 3-hop circuit for DNS resolution using PathSelector
+        selector = PathSelector(consensus=consensus)
+        try:
+            path = selector.select_path(num_hops=3)
+        except ValueError as e:
+            print(f"Path selection failed: {e}", file=sys.stderr)
+            return 1
 
-        for role in ["guard", "middle", "exit"]:
-            router = _select_random_router(consensus, role, used_fingerprints, port=None)
-            if router is None:
-                print(f"No suitable {role} router found", file=sys.stderr)
-                return 1
-            routers.append(router)
-            used_fingerprints.append(router.fingerprint)
+        routers = path.routers
 
         # Fetch ntor keys for all routers
         ntor_keys = []
@@ -961,6 +989,19 @@ def main() -> int:
         "query", metavar="nickname|fingerprint", help="Router nickname or fingerprint"
     )
 
+    # path command
+    path_parser = subparsers.add_parser(
+        "path", help="Select a path through the Tor network (bandwidth-weighted)"
+    )
+    path_parser.add_argument(
+        "--hops", type=int, choices=[1, 2, 3], default=3, help="Number of hops (default: 3)"
+    )
+    path_parser.add_argument("--guard", metavar="ROUTER", help="Guard router (default: random)")
+    path_parser.add_argument("--middle", metavar="ROUTER", help="Middle router (default: random)")
+    path_parser.add_argument("--exit", metavar="ROUTER", help="Exit router (default: random)")
+    path_parser.add_argument("--port", type=int, metavar="PORT", help="Target port (filters exits)")
+    path_parser.add_argument("--debug", action="store_true", help="Enable debug output")
+
     # circuit command
     circuit_parser = subparsers.add_parser(
         "circuit", help="Build a Tor circuit (1-3 hops), optionally open stream"
@@ -1004,6 +1045,7 @@ def main() -> int:
         "routers": cmd_routers,
         "router": cmd_router,
         "extra-info": cmd_extra_info,
+        "path": cmd_path,
         "circuit": cmd_circuit,
         "resolve": cmd_resolve,
     }
