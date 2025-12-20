@@ -1,6 +1,5 @@
 """Tests for exit policy parsing and matching."""
 
-
 from torscope.directory.exit_policy import ExitPolicy, check_exit_policy, parse_port_list
 
 

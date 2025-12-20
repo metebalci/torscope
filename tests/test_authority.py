@@ -1,6 +1,5 @@
 """Tests for directory authority module."""
 
-
 from torscope.directory.authority import (
     DirectoryAuthority,
     get_authorities,
@@ -56,7 +55,6 @@ class TestDirectoryAuthority:
         assert auth_with_ipv6.ipv6_address == "[2001:db8::1]:9131"
 
 
-
 class TestDirectoryAuthorityList:
     """Tests for get_authorities() function."""
 
@@ -109,9 +107,7 @@ class TestDirectoryAuthorityList:
 
     def test_authorities_with_ipv6(self):
         """Test that some authorities have IPv6 addresses."""
-        ipv6_authorities = [
-            auth for auth in get_authorities() if auth.ipv6_address is not None
-        ]
+        ipv6_authorities = [auth for auth in get_authorities() if auth.ipv6_address is not None]
         # gabelmoo and maatuska have IPv6 addresses
         assert len(ipv6_authorities) >= 2
 

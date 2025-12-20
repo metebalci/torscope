@@ -22,9 +22,7 @@ class TestConsensusParser:
 
     def test_parse_sample_consensus(self):
         """Test parsing a complete sample consensus document."""
-        consensus = ConsensusParser.parse(
-            SAMPLE_CONSENSUS.encode("utf-8"), fetched_from="moria1"
-        )
+        consensus = ConsensusParser.parse(SAMPLE_CONSENSUS.encode("utf-8"), fetched_from="moria1")
 
         assert isinstance(consensus, ConsensusDocument)
         assert consensus.fetched_from == "moria1"
@@ -35,9 +33,7 @@ class TestConsensusParser:
 
         assert consensus.version == EXPECTED_CONSENSUS_VALUES["version"]
         assert consensus.vote_status == EXPECTED_CONSENSUS_VALUES["vote_status"]
-        assert (
-            consensus.consensus_method == EXPECTED_CONSENSUS_VALUES["consensus_method"]
-        )
+        assert consensus.consensus_method == EXPECTED_CONSENSUS_VALUES["consensus_method"]
         assert consensus.valid_after == EXPECTED_CONSENSUS_VALUES["valid_after"]
         assert consensus.fresh_until == EXPECTED_CONSENSUS_VALUES["fresh_until"]
         assert consensus.valid_until == EXPECTED_CONSENSUS_VALUES["valid_until"]
@@ -47,17 +43,13 @@ class TestConsensusParser:
         """Test parsing client-versions field."""
         consensus = ConsensusParser.parse(SAMPLE_CONSENSUS.encode("utf-8"))
 
-        assert (
-            consensus.client_versions == EXPECTED_CONSENSUS_VALUES["client_versions"]
-        )
+        assert consensus.client_versions == EXPECTED_CONSENSUS_VALUES["client_versions"]
 
     def test_parse_server_versions(self):
         """Test parsing server-versions field."""
         consensus = ConsensusParser.parse(SAMPLE_CONSENSUS.encode("utf-8"))
 
-        assert (
-            consensus.server_versions == EXPECTED_CONSENSUS_VALUES["server_versions"]
-        )
+        assert consensus.server_versions == EXPECTED_CONSENSUS_VALUES["server_versions"]
 
     def test_parse_known_flags(self):
         """Test parsing known-flags field."""

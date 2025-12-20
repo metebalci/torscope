@@ -67,9 +67,13 @@ class TestKeyCertificateParser:
 
     def test_parse_multiple_certificates(self) -> None:
         """Test parsing multiple certificates."""
-        multi_cert = SAMPLE_CERTIFICATE + "\n" + SAMPLE_CERTIFICATE.replace(
-            "ABC123DEF456789012345678901234567890ABCD",
-            "XYZ789DEF456789012345678901234567890WXYZ",
+        multi_cert = (
+            SAMPLE_CERTIFICATE
+            + "\n"
+            + SAMPLE_CERTIFICATE.replace(
+                "ABC123DEF456789012345678901234567890ABCD",
+                "XYZ789DEF456789012345678901234567890WXYZ",
+            )
         )
         certs = KeyCertificateParser.parse(multi_cert.encode("utf-8"))
         assert len(certs) == 2

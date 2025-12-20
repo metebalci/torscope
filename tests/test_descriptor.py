@@ -1,6 +1,5 @@
 """Tests for server descriptor parsing."""
 
-
 from torscope.directory.descriptor import ServerDescriptorParser
 from torscope.directory.models import ServerDescriptor
 

@@ -1,6 +1,5 @@
 """Tests for Tor cell format implementation."""
 
-
 from torscope.onion.cell import (
     CELL_LEN_V3,
     CELL_LEN_V4,
@@ -176,10 +175,12 @@ class TestCertsCell:
 
     def test_pack_certs_cell(self):
         """Test packing a CERTS cell."""
-        cell = CertsCell(certificates=[
-            (1, b"certificate1"),
-            (2, b"certificate2"),
-        ])
+        cell = CertsCell(
+            certificates=[
+                (1, b"certificate1"),
+                (2, b"certificate2"),
+            ]
+        )
         packed = cell.pack(link_protocol=4)
         # Variable-length cell
         # CircID (4) + Command (1) + Length (2) + NumCerts (1) + certs
@@ -187,10 +188,12 @@ class TestCertsCell:
 
     def test_unpack_certs_cell(self):
         """Test unpacking a CERTS cell."""
-        cell = CertsCell(certificates=[
-            (1, b"cert1"),
-            (2, b"cert2"),
-        ])
+        cell = CertsCell(
+            certificates=[
+                (1, b"cert1"),
+                (2, b"cert2"),
+            ]
+        )
         packed = cell.pack(link_protocol=4)
         unpacked = CertsCell.unpack(packed, link_protocol=4)
         assert len(unpacked.certificates) == 2

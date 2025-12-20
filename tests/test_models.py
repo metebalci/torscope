@@ -566,9 +566,7 @@ class TestMicrodescriptor:
 
     def test_is_exit_property_with_accept_policy(self):
         """Test is_exit property returns True for accept policies."""
-        md = Microdescriptor(
-            digest="dGVzdA==", exit_policy_v4="accept 80,443,8080-8090"
-        )
+        md = Microdescriptor(digest="dGVzdA==", exit_policy_v4="accept 80,443,8080-8090")
         assert md.is_exit is True
 
     def test_is_exit_property_with_reject_policy(self):

@@ -91,9 +91,7 @@ class TestFetchConsensus:
         )
         client = DirectoryClient()
 
-        content, used_authority = client.fetch_consensus(
-            authority=authority, consensus_type="full"
-        )
+        content, used_authority = client.fetch_consensus(authority=authority, consensus_type="full")
 
         # Verify URL for full consensus
         expected_url = "http://128.31.0.34:9131/tor/status-vote/current/consensus"
@@ -338,9 +336,7 @@ class TestFetchServerDescriptors:
         client = DirectoryClient()
 
         fingerprints = ["ABCDEF123456"]
-        content, used_authority = client.fetch_server_descriptors(
-            fingerprints, authority
-        )
+        content, used_authority = client.fetch_server_descriptors(fingerprints, authority)
 
         assert content == b"server descriptor data"
         assert used_authority == authority
