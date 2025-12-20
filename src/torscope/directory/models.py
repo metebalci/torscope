@@ -191,8 +191,8 @@ class ConsensusDocument:
         return valid_after <= now <= fresh_until
 
     @property
-    def total_relays(self) -> int:
-        """Get total number of relays in consensus."""
+    def total_routers(self) -> int:
+        """Get total number of routers in consensus."""
         return len(self.routers)
 
     @property
@@ -200,8 +200,8 @@ class ConsensusDocument:
         """Get count of verified signatures."""
         return sum(1 for sig in self.signatures if sig.verified is True)
 
-    def get_relays_by_flag(self, flag: str) -> list[RouterStatusEntry]:
-        """Get all relays with a specific flag."""
+    def get_routers_by_flag(self, flag: str) -> list[RouterStatusEntry]:
+        """Get all routers with a specific flag."""
         return [r for r in self.routers if r.has_flag(flag)]
 
     def verify_signatures(self, certificates: list["KeyCertificate"]) -> int:

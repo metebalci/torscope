@@ -1,10 +1,8 @@
 """Tests for server descriptor parsing."""
 
-import pytest
 
 from torscope.directory.descriptor import ServerDescriptorParser
 from torscope.directory.models import ServerDescriptor
-
 
 # Sample server descriptor for testing
 SAMPLE_DESCRIPTOR = b"""router TestRelay 192.0.2.1 9001 0 0
@@ -14,7 +12,7 @@ AQQABp1bAXe...
 -----END ED25519 CERT-----
 master-key-ed25519 AbCdEfGhIjKlMnOpQrStUvWxYz0123456789ABCDEFGH
 platform Tor 0.4.8.10 on Linux
-proto Cons=1-2 Desc=1-2 DirCache=2 FlowCtrl=1-2 HSDir=2 HSIntro=4-5 HSRend=1-2 Link=1-5 LinkAuth=1,3 Microdesc=1-2 Padding=2 Relay=1-4
+proto Cons=1-2 Desc=1-2 DirCache=2 HSDir=2 HSIntro=4-5 Link=1-5 Microdesc=1-2 Relay=1-4
 published 2024-01-15 12:00:00
 fingerprint ABCD 1234 EFGH 5678 IJKL 9012 MNOP 3456 QRST 7890
 uptime 86400

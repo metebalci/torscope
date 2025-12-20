@@ -1,6 +1,5 @@
 """Tests for directory authority module."""
 
-import pytest
 
 from torscope.directory.authority import (
     DirectoryAuthority,
@@ -184,7 +183,7 @@ class TestGetRandomAuthority:
         """Test that get_random_authority can return different authorities."""
         # Get 20 random authorities, should get some variation
         authorities = [get_random_authority() for _ in range(20)]
-        unique_authorities = set(auth.nickname for auth in authorities)
+        unique_authorities = {auth.nickname for auth in authorities}
 
         # With 9 authorities and 20 selections, we should get at least 2 different ones
         # This test could theoretically fail due to randomness, but probability is very low

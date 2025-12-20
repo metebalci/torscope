@@ -1,6 +1,6 @@
 """Tests for consensus parsing."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -236,9 +236,9 @@ known-flags Running Valid
 
     def test_parse_sets_fetched_at(self):
         """Test that parser sets fetched_at timestamp."""
-        before = datetime.now(timezone.utc)
+        before = datetime.now(UTC)
         consensus = ConsensusParser.parse(SAMPLE_CONSENSUS.encode("utf-8"))
-        after = datetime.now(timezone.utc)
+        after = datetime.now(UTC)
 
         assert consensus.fetched_at is not None
         assert before <= consensus.fetched_at <= after
@@ -263,18 +263,18 @@ class TestParseDatetime:
 
     def test_parse_invalid_datetime_returns_current_time(self):
         """Test that invalid datetime returns current UTC time."""
-        before = datetime.now(timezone.utc)
+        before = datetime.now(UTC)
         result = ConsensusParser._parse_datetime("invalid-date-string")
-        after = datetime.now(timezone.utc)
+        after = datetime.now(UTC)
 
         # Should return a timestamp close to now
         assert before <= result <= after
 
     def test_parse_empty_string(self):
         """Test parsing empty string."""
-        before = datetime.now(timezone.utc)
+        before = datetime.now(UTC)
         result = ConsensusParser._parse_datetime("")
-        after = datetime.now(timezone.utc)
+        after = datetime.now(UTC)
 
         assert before <= result <= after
 

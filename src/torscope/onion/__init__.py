@@ -27,11 +27,15 @@ from torscope.onion.relay import (
     RelayCommand,
     RelayCrypto,
     RelayEndReason,
+    ResolvedAnswer,
+    ResolvedType,
     create_begin_payload,
     create_end_payload,
     create_extend2_payload,
+    create_resolve_payload,
     parse_connected_payload,
     parse_extended2_payload,
+    parse_resolved_payload,
 )
 
 __all__ = [
@@ -63,9 +67,13 @@ __all__ = [
     "RelayEndReason",
     "LinkSpecifier",
     "LinkSpecifierType",
+    "ResolvedAnswer",
+    "ResolvedType",
     "create_begin_payload",
     "create_end_payload",
     "create_extend2_payload",
+    "create_resolve_payload",
     "parse_connected_payload",
     "parse_extended2_payload",
+    "parse_resolved_payload",
 ]

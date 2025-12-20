@@ -1,10 +1,8 @@
 """Tests for microdescriptor parser."""
 
-import pytest
 
 from torscope.directory.microdescriptor import MicrodescriptorParser
 from torscope.directory.models import Microdescriptor
-
 
 # Sample microdescriptor for testing
 SAMPLE_MICRODESCRIPTOR = """\

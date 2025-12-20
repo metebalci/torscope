@@ -1,9 +1,7 @@
 """Tests for directory models."""
 
 import base64
-from datetime import datetime, timedelta, timezone
-
-import pytest
+from datetime import UTC, datetime, timedelta
 
 from torscope.directory.models import (
     AuthorityEntry,
@@ -329,7 +327,7 @@ class TestConsensusDocument:
 
     def test_basic_consensus_creation(self):
         """Test creating a basic consensus document."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         consensus = ConsensusDocument(
             version=3,
             vote_status="consensus",
@@ -347,7 +345,7 @@ class TestConsensusDocument:
 
     def test_is_valid_property(self):
         """Test is_valid property checks current time."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         # Valid consensus
         valid_consensus = ConsensusDocument(
@@ -387,7 +385,7 @@ class TestConsensusDocument:
 
     def test_is_fresh_property(self):
         """Test is_fresh property checks freshness time."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         # Fresh consensus
         fresh_consensus = ConsensusDocument(
@@ -413,34 +411,34 @@ class TestConsensusDocument:
         )
         assert stale_consensus.is_fresh is False
 
-    def test_total_relays_property(self):
-        """Test total_relays property."""
+    def test_total_routers_property(self):
+        """Test total_routers property."""
         consensus = ConsensusDocument(
             version=3,
             vote_status="consensus",
             consensus_method=28,
-            valid_after=datetime.now(timezone.utc),
-            fresh_until=datetime.now(timezone.utc),
-            valid_until=datetime.now(timezone.utc),
+            valid_after=datetime.now(UTC),
+            fresh_until=datetime.now(UTC),
+            valid_until=datetime.now(UTC),
             voting_delay=(300, 300),
         )
 
-        assert consensus.total_relays == 0
+        assert consensus.total_routers == 0
 
         # Add some routers
         for i in range(5):
             router = RouterStatusEntry(
-                nickname=f"Relay{i}",
+                nickname=f"Router{i}",
                 identity=f"ID{i}",
                 digest=f"DIGEST{i}",
-                published=datetime.now(timezone.utc),
+                published=datetime.now(UTC),
                 ip="192.0.2.1",
                 orport=9001,
                 dirport=9030,
             )
             consensus.routers.append(router)
 
-        assert consensus.total_relays == 5
+        assert consensus.total_routers == 5
 
     def test_verified_signatures_property(self):
         """Test verified_signatures property counts verified signatures."""
@@ -448,9 +446,9 @@ class TestConsensusDocument:
             version=3,
             vote_status="consensus",
             consensus_method=28,
-            valid_after=datetime.now(timezone.utc),
-            fresh_until=datetime.now(timezone.utc),
-            valid_until=datetime.now(timezone.utc),
+            valid_after=datetime.now(UTC),
+            fresh_until=datetime.now(UTC),
+            valid_until=datetime.now(UTC),
             voting_delay=(300, 300),
         )
 
@@ -496,25 +494,25 @@ class TestConsensusDocument:
 
         assert consensus.verified_signatures == 2
 
-    def test_get_relays_by_flag(self):
-        """Test get_relays_by_flag method."""
+    def test_get_routers_by_flag(self):
+        """Test get_routers_by_flag method."""
         consensus = ConsensusDocument(
             version=3,
             vote_status="consensus",
             consensus_method=28,
-            valid_after=datetime.now(timezone.utc),
-            fresh_until=datetime.now(timezone.utc),
-            valid_until=datetime.now(timezone.utc),
+            valid_after=datetime.now(UTC),
+            fresh_until=datetime.now(UTC),
+            valid_until=datetime.now(UTC),
             voting_delay=(300, 300),
         )
 
         # Add routers with different flags
         consensus.routers.append(
             RouterStatusEntry(
-                nickname="ExitRelay",
+                nickname="ExitRouter",
                 identity="ID1",
                 digest="D1",
-                published=datetime.now(timezone.utc),
+                published=datetime.now(UTC),
                 ip="192.0.2.1",
                 orport=9001,
                 dirport=9030,
@@ -523,10 +521,10 @@ class TestConsensusDocument:
         )
         consensus.routers.append(
             RouterStatusEntry(
-                nickname="GuardRelay",
+                nickname="GuardRouter",
                 identity="ID2",
                 digest="D2",
-                published=datetime.now(timezone.utc),
+                published=datetime.now(UTC),
                 ip="192.0.2.2",
                 orport=9001,
                 dirport=9030,
@@ -535,10 +533,10 @@ class TestConsensusDocument:
         )
         consensus.routers.append(
             RouterStatusEntry(
-                nickname="ExitGuardRelay",
+                nickname="ExitGuardRouter",
                 identity="ID3",
                 digest="D3",
-                published=datetime.now(timezone.utc),
+                published=datetime.now(UTC),
                 ip="192.0.2.3",
                 orport=9001,
                 dirport=9030,
@@ -546,16 +544,16 @@ class TestConsensusDocument:
             )
         )
 
-        exit_relays = consensus.get_relays_by_flag("Exit")
-        assert len(exit_relays) == 2
-        assert all(r.has_flag("Exit") for r in exit_relays)
+        exit_routers = consensus.get_routers_by_flag("Exit")
+        assert len(exit_routers) == 2
+        assert all(r.has_flag("Exit") for r in exit_routers)
 
-        guard_relays = consensus.get_relays_by_flag("Guard")
-        assert len(guard_relays) == 2
-        assert all(r.has_flag("Guard") for r in guard_relays)
+        guard_routers = consensus.get_routers_by_flag("Guard")
+        assert len(guard_routers) == 2
+        assert all(r.has_flag("Guard") for r in guard_routers)
 
-        stable_relays = consensus.get_relays_by_flag("Stable")
-        assert len(stable_relays) == 2
+        stable_routers = consensus.get_routers_by_flag("Stable")
+        assert len(stable_routers) == 2
 
 
 class TestMicrodescriptor:

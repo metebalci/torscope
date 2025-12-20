@@ -1,24 +1,28 @@
 .DEFAULT_GOAL = build
 
+VENV = venv
+PYTHON = $(VENV)/bin/python
+PIP = $(VENV)/bin/pip
+
 .PHONY: test lint dist-clean build upload update-authorities
 
 lint:
-	black --check src
-	ruff check src
-	mypy src
-	pylint src
+	$(VENV)/bin/black --check src
+	$(VENV)/bin/ruff check src
+	$(VENV)/bin/mypy src
+	$(VENV)/bin/pylint src
 
 test: lint
-	pytest
+	$(VENV)/bin/pytest
 
 dist-clean:
 	rm -rf dist
 
 build: dist-clean
-	python -m build
+	$(PYTHON) -m build
 
 upload: dist-clean build
-	python -m twine upload dist/*
+	$(PYTHON) -m twine upload dist/*
 
 update-authorities:
-	python scripts/update_authorities.py
+	$(PYTHON) scripts/update_authorities.py

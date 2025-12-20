@@ -21,6 +21,7 @@ from torscope.cache import (
     save_microdescriptors,
 )
 from torscope.directory.authority import get_authorities
+from torscope.directory.certificates import KeyCertificateParser
 from torscope.directory.client import DirectoryClient
 from torscope.directory.consensus import ConsensusParser
 from torscope.directory.descriptor import ServerDescriptorParser
@@ -33,9 +34,37 @@ from torscope.onion.circuit import Circuit
 from torscope.onion.connection import RelayConnection
 
 
+def verify_consensus_signatures(consensus: ConsensusDocument) -> tuple[int, int]:
+    """
+    Verify consensus signatures against authority key certificates.
+
+    Supports both SHA1 (full/ns consensus) and SHA256 (microdesc consensus)
+    signature verification.
+
+    Args:
+        consensus: ConsensusDocument to verify
+
+    Returns:
+        Tuple of (verified_count, total_signatures)
+    """
+    try:
+        # Fetch authority key certificates
+        client = DirectoryClient()
+        cert_content, _ = client.fetch_key_certificates()
+        certificates = KeyCertificateParser.parse(cert_content)
+
+        # Verify signatures
+        verified = consensus.verify_signatures(certificates)
+        return verified, len(consensus.signatures)
+    except Exception:  # pylint: disable=broad-exception-caught
+        return 0, len(consensus.signatures)
+
+
 def get_consensus(no_cache: bool = False) -> ConsensusDocument:
     """
     Get consensus from cache or fetch from network.
+
+    Always verifies consensus signatures against authority key certificates.
 
     Args:
         no_cache: If True, bypass cache and always fetch
@@ -53,9 +82,14 @@ def get_consensus(no_cache: bool = False) -> ConsensusDocument:
             consensus, meta = cached
             source = meta["source"]
             source_type = meta["source_type"]
-            msg = f"Using network consensus ({consensus.total_relays:,} relays) "
+            msg = f"Using network consensus ({consensus.total_routers:,} routers) "
             msg += f"from {source} ({source_type})"
             print(msg, file=sys.stderr)
+
+            # Always verify signatures
+            verified, total = verify_consensus_signatures(consensus)
+            print(f"Verified {verified}/{total} consensus signatures", file=sys.stderr)
+
             return consensus
 
         # Check if there's an expired consensus
@@ -71,9 +105,13 @@ def get_consensus(no_cache: bool = False) -> ConsensusDocument:
     client = DirectoryClient()
     content, used_authority = client.fetch_consensus(None, "microdesc")
     consensus = ConsensusParser.parse(content, used_authority.nickname)
-    msg = f"Fetched network consensus ({consensus.total_relays:,} relays) "
+    msg = f"Fetched network consensus ({consensus.total_routers:,} routers) "
     msg += f"from {used_authority.nickname} (authority)"
     print(msg, file=sys.stderr)
+
+    # Always verify signatures
+    verified, total = verify_consensus_signatures(consensus)
+    print(f"Verified {verified}/{total} consensus signatures", file=sys.stderr)
 
     # Save consensus to cache
     save_consensus(content, used_authority.nickname, "authority")
@@ -122,27 +160,29 @@ def cmd_fallbacks(args: argparse.Namespace) -> int:  # pylint: disable=unused-ar
     return 0
 
 
-def cmd_relays(args: argparse.Namespace) -> int:
-    """List relays from network consensus."""
+def cmd_routers(args: argparse.Namespace) -> int:
+    """List routers from network consensus."""
     try:
         consensus = get_consensus()
 
-        # Filter relays
-        relays = consensus.routers
+        # Filter routers
+        routers = consensus.routers
         if args.flags:
             filter_flags = [f.strip() for f in args.flags.split(",")]
-            relays = [r for r in relays if all(r.has_flag(flag) for flag in filter_flags)]
+            routers = [r for r in routers if all(r.has_flag(flag) for flag in filter_flags)]
 
         # Display header
-        print(f"\nRelays ({len(relays):,} total):\n")
+        print(f"\nRouters ({len(routers):,} total):\n")
         print(f"{'Nickname':<20} {'Fingerprint':<11} {'Flags'}")
         print("-" * 70)
 
-        # Display relays
-        for relay in relays:
-            nickname = relay.nickname[:17] + "..." if len(relay.nickname) > 20 else relay.nickname
-            fp = relay.short_fingerprint
-            flags = ",".join(relay.flags)
+        # Display routers
+        for router in routers:
+            nickname = (
+                router.nickname[:17] + "..." if len(router.nickname) > 20 else router.nickname
+            )
+            fp = router.short_fingerprint
+            flags = ",".join(router.flags)
             print(f"{nickname:<20} {fp:<11} {flags}")
 
         return 0
@@ -153,51 +193,51 @@ def cmd_relays(args: argparse.Namespace) -> int:
         return 1
 
 
-def cmd_relay(args: argparse.Namespace) -> int:
-    """Show details for a specific relay."""
+def cmd_router(args: argparse.Namespace) -> int:
+    """Show details for a specific router."""
     try:
         consensus = get_consensus()
 
-        # Find relay by fingerprint or nickname
+        # Find router by fingerprint or nickname
         query = args.query.upper()
-        relay = None
+        router = None
 
         for r in consensus.routers:
             # Match by fingerprint (full or partial)
             if r.fingerprint.startswith(query):
-                relay = r
+                router = r
                 break
             # Match by nickname (case-insensitive)
             if r.nickname.upper() == query:
-                relay = r
+                router = r
                 break
 
-        if relay is None:
-            print(f"Relay not found: {args.query}", file=sys.stderr)
+        if router is None:
+            print(f"Router not found: {args.query}", file=sys.stderr)
             return 1
 
         # Display consensus info
-        print(f"\nRelay: {relay.nickname}")
+        print(f"\nRouter: {router.nickname}")
         print("=" * 70)
-        print(f"  Fingerprint:  {relay.fingerprint}")
-        print(f"  Address:      {relay.ip}:{relay.orport}")
-        if relay.dirport:
-            print(f"  DirPort:      {relay.dirport}")
-        if relay.ipv6_addresses:
-            for addr in relay.ipv6_addresses:
+        print(f"  Fingerprint:  {router.fingerprint}")
+        print(f"  Address:      {router.ip}:{router.orport}")
+        if router.dirport:
+            print(f"  DirPort:      {router.dirport}")
+        if router.ipv6_addresses:
+            for addr in router.ipv6_addresses:
                 print(f"  IPv6:         {addr}")
-        print(f"  Published:    {relay.published} UTC")
-        print(f"  Flags:        {', '.join(relay.flags)}")
-        if relay.version:
-            print(f"  Version:      {relay.version}")
-        if relay.bandwidth:
-            bw_mbps = relay.bandwidth / 1_000_000
+        print(f"  Published:    {router.published} UTC")
+        print(f"  Flags:        {', '.join(router.flags)}")
+        if router.version:
+            print(f"  Version:      {router.version}")
+        if router.bandwidth:
+            bw_mbps = router.bandwidth / 1_000_000
             print(f"  Bandwidth:    {bw_mbps:.2f} MB/s")
 
         # Fetch full descriptor for additional details
         client = DirectoryClient()
         print("\nFetching full descriptor...", file=sys.stderr)
-        content, _ = client.fetch_server_descriptors([relay.fingerprint])
+        content, _ = client.fetch_server_descriptors([router.fingerprint])
         descriptors = ServerDescriptorParser.parse(content)
 
         if descriptors:
@@ -255,42 +295,42 @@ def cmd_relay(args: argparse.Namespace) -> int:
 
 
 def cmd_extra_info(args: argparse.Namespace) -> int:
-    """Show extra-info statistics for a relay."""
+    """Show extra-info statistics for a router."""
     try:
         consensus = get_consensus()
 
-        # Find relay by fingerprint or nickname
+        # Find router by fingerprint or nickname
         query = args.query.upper()
-        relay = None
+        router = None
 
         for r in consensus.routers:
             if r.fingerprint.startswith(query):
-                relay = r
+                router = r
                 break
             if r.nickname.upper() == query:
-                relay = r
+                router = r
                 break
 
-        if relay is None:
-            print(f"Relay not found: {args.query}", file=sys.stderr)
+        if router is None:
+            print(f"Router not found: {args.query}", file=sys.stderr)
             return 1
 
         # Fetch extra-info
         client = DirectoryClient()
-        print(f"Fetching extra-info for {relay.nickname}...", file=sys.stderr)
-        extra_content, _ = client.fetch_extra_info([relay.fingerprint])
+        print(f"Fetching extra-info for {router.nickname}...", file=sys.stderr)
+        extra_content, _ = client.fetch_extra_info([router.fingerprint])
         extra_infos = ExtraInfoParser.parse(extra_content)
 
         if not extra_infos:
-            print(f"No extra-info available for {relay.nickname}", file=sys.stderr)
+            print(f"No extra-info available for {router.nickname}", file=sys.stderr)
             return 1
 
         extra = extra_infos[0]
 
         # Display header
-        print(f"\nExtra-Info: {relay.nickname}")
+        print(f"\nExtra-Info: {router.nickname}")
         print("=" * 70)
-        print(f"  Fingerprint:  {relay.fingerprint}")
+        print(f"  Fingerprint:  {router.fingerprint}")
         print(f"  Published:    {extra.published} UTC")
 
         # Bandwidth history
@@ -361,8 +401,8 @@ def cmd_extra_info(args: argparse.Namespace) -> int:
         return 1
 
 
-def _find_relay(consensus: ConsensusDocument, query: str) -> RouterStatusEntry | None:
-    """Find relay by fingerprint or nickname."""
+def _find_router(consensus: ConsensusDocument, query: str) -> RouterStatusEntry | None:
+    """Find router by fingerprint or nickname."""
     query_upper = query.upper()
     for r in consensus.routers:
         if r.fingerprint.startswith(query_upper):
@@ -372,23 +412,23 @@ def _find_relay(consensus: ConsensusDocument, query: str) -> RouterStatusEntry |
     return None
 
 
-def _select_random_relay(
+def _select_random_router(
     consensus: ConsensusDocument,
     role: str,
     exclude: list[str] | None = None,
     port: int | None = None,
 ) -> RouterStatusEntry | None:
     """
-    Select a random relay appropriate for a circuit role.
+    Select a random router appropriate for a circuit role.
 
     Args:
         consensus: The consensus document
         role: One of "guard", "middle", "exit"
-        exclude: List of fingerprints to exclude (avoid same relay twice)
-        port: Target port (for exit relay selection, filters by exit policy)
+        exclude: List of fingerprints to exclude (avoid same router twice)
+        port: Target port (for exit router selection, filters by exit policy)
 
     Returns:
-        A random relay suitable for the role, or None if none found
+        A random router suitable for the role, or None if none found
     """
     exclude_set = set(exclude) if exclude else set()
 
@@ -415,7 +455,7 @@ def _select_random_relay(
             and (port is None or r.allows_port(port))
         ]
     else:  # middle
-        # Middle relays need Stable and Fast flags
+        # Middle routers need Stable and Fast flags
         candidates = [
             r
             for r in consensus.routers
@@ -428,10 +468,10 @@ def _select_random_relay(
     return random.choice(candidates)
 
 
-def _select_v2dir_relay(
+def _select_v2dir_router(
     consensus: ConsensusDocument, exclude: list[str] | None = None
 ) -> RouterStatusEntry | None:
-    """Select a random V2Dir relay with a DirPort for fetching directory documents."""
+    """Select a random V2Dir router with a DirPort for fetching directory documents."""
     exclude_set = set(exclude) if exclude else set()
     candidates = [
         r
@@ -447,13 +487,13 @@ def _select_v2dir_relay(
     return random.choice(candidates)
 
 
-def _fetch_microdesc_from_relay(
-    relay: RouterStatusEntry, hashes: list[str]
+def _fetch_microdesc_from_router(
+    router: RouterStatusEntry, hashes: list[str]
 ) -> tuple[bytes, RouterStatusEntry] | None:
-    """Fetch microdescriptors from a V2Dir relay's DirPort."""
-    # Build URL for the relay's DirPort
+    """Fetch microdescriptors from a V2Dir router's DirPort."""
+    # Build URL for the router's DirPort
     hash_string = "-".join(h.rstrip("=") for h in hashes)
-    url = f"http://{relay.ip}:{relay.dirport}/tor/micro/d/{hash_string}"
+    url = f"http://{router.ip}:{router.dirport}/tor/micro/d/{hash_string}"
 
     headers = {
         "Accept-Encoding": "deflate, gzip",
@@ -464,20 +504,20 @@ def _fetch_microdesc_from_relay(
         with httpx.Client(timeout=10.0) as client:
             response = client.get(url, headers=headers, follow_redirects=True)
             response.raise_for_status()
-            return response.content, relay
+            return response.content, router
     except httpx.HTTPError:
         return None
 
 
 def _get_ntor_key(
-    relay: RouterStatusEntry, consensus: ConsensusDocument
+    router: RouterStatusEntry, consensus: ConsensusDocument
 ) -> tuple[bytes, str, str, bool] | None:
     """
-    Get ntor-onion-key for a relay, using cache or fetching on-demand.
+    Get ntor-onion-key for a router, using cache or fetching on-demand.
 
     Args:
-        relay: Router status entry with fingerprint and microdesc_hash
-        consensus: Network consensus for finding V2Dir relays
+        router: Router status entry with fingerprint and microdesc_hash
+        consensus: Network consensus for finding V2Dir routers
 
     Returns:
         Tuple of (32-byte ntor key, source_name, source_type, from_cache) or None
@@ -485,33 +525,33 @@ def _get_ntor_key(
         from_cache indicates if this was retrieved from local cache
     """
     # Try cached microdescriptor first
-    if relay.microdesc_hash:
-        cache_result = get_ntor_key_from_cache(relay.microdesc_hash)
+    if router.microdesc_hash:
+        cache_result = get_ntor_key_from_cache(router.microdesc_hash)
         if cache_result is not None:
             ntor_key, source_name, source_type = cache_result
             return ntor_key, source_name, source_type, True
 
-        # Try fetching from a V2Dir relay (directory cache)
-        v2dir_relay = _select_v2dir_relay(consensus, exclude=[relay.fingerprint])
-        if v2dir_relay:
-            result = _fetch_microdesc_from_relay(v2dir_relay, [relay.microdesc_hash])
+        # Try fetching from a V2Dir router (directory cache)
+        v2dir_router = _select_v2dir_router(consensus, exclude=[router.fingerprint])
+        if v2dir_router:
+            result = _fetch_microdesc_from_router(v2dir_router, [router.microdesc_hash])
             if result:
-                md_content, used_relay = result
+                md_content, used_router = result
                 microdescriptors = MicrodescriptorParser.parse(md_content)
                 if microdescriptors:
-                    save_microdescriptors(microdescriptors, used_relay.nickname, "dircache")
-                    cache_result = get_ntor_key_from_cache(relay.microdesc_hash)
+                    save_microdescriptors(microdescriptors, used_router.nickname, "dircache")
+                    cache_result = get_ntor_key_from_cache(router.microdesc_hash)
                     if cache_result is not None:
-                        return cache_result[0], used_relay.nickname, "dircache", False
+                        return cache_result[0], used_router.nickname, "dircache", False
 
         # Fall back to authority
         try:
             client = DirectoryClient()
-            md_content, authority = client.fetch_microdescriptors([relay.microdesc_hash])
+            md_content, authority = client.fetch_microdescriptors([router.microdesc_hash])
             microdescriptors = MicrodescriptorParser.parse(md_content)
             if microdescriptors:
                 save_microdescriptors(microdescriptors, authority.nickname, "authority")
-                cache_result = get_ntor_key_from_cache(relay.microdesc_hash)
+                cache_result = get_ntor_key_from_cache(router.microdesc_hash)
                 if cache_result is not None:
                     return cache_result[0], authority.nickname, "authority", False
         # pylint: disable-next=broad-exception-caught
@@ -519,7 +559,7 @@ def _get_ntor_key(
             pass  # Fall through to server descriptor
 
     # Fall back to fetching server descriptor
-    desc_result = fetch_ntor_key(relay.fingerprint)
+    desc_result = fetch_ntor_key(router.fingerprint)
     if desc_result is not None:
         ntor_key, source_name = desc_result
         return ntor_key, source_name, "descriptor", False
@@ -533,97 +573,97 @@ def cmd_circuit(args: argparse.Namespace) -> int:  # pylint: disable=too-many-re
 
         num_hops = args.hops
 
-        # Build relay specs based on number of hops
+        # Build router specs based on number of hops
         exit_spec = vars(args)["exit"]  # 'exit' is a builtin name
         all_specs = [
             ("guard", args.guard),
             ("middle", args.middle),
             ("exit", exit_spec),
         ]
-        relay_specs = all_specs[:num_hops]
+        router_specs = all_specs[:num_hops]
 
-        # Resolve relays (None means random selection)
-        relays = []
+        # Resolve routers (None means random selection)
+        routers = []
         used_fingerprints: list[str] = []
         target_port = args.port  # For exit policy matching
 
-        for role, query in relay_specs:
+        for role, query in router_specs:
             if query is None:
                 # Random selection based on role
-                # Pass target port for exit relay selection
+                # Pass target port for exit router selection
                 port_filter = target_port if role == "exit" else None
-                relay = _select_random_relay(consensus, role, used_fingerprints, port_filter)
-                if relay is None:
+                router = _select_random_router(consensus, role, used_fingerprints, port_filter)
+                if router is None:
                     if role == "exit" and target_port:
                         print(
-                            f"No suitable {role} relay found for port {target_port}",
+                            f"No suitable {role} router found for port {target_port}",
                             file=sys.stderr,
                         )
                     else:
-                        print(f"No suitable {role} relay found", file=sys.stderr)
+                        print(f"No suitable {role} router found", file=sys.stderr)
                     return 1
             else:
-                relay = _find_relay(consensus, query.strip())
-                if relay is None:
-                    print(f"Relay not found: {query}", file=sys.stderr)
+                router = _find_router(consensus, query.strip())
+                if router is None:
+                    print(f"Router not found: {query}", file=sys.stderr)
                     return 1
-            relays.append(relay)
-            used_fingerprints.append(relay.fingerprint)
+            routers.append(router)
+            used_fingerprints.append(router.fingerprint)
 
         # Check if stream requested
         has_stream = args.target is not None and args.port is not None
 
         # Warn if exit doesn't have Exit flag (only for 3-hop with stream)
-        if has_stream and num_hops == 3 and "Exit" not in relays[2].flags:
-            print(f"Warning: {relays[2].nickname} does not have Exit flag", file=sys.stderr)
+        if has_stream and num_hops == 3 and "Exit" not in routers[2].flags:
+            print(f"Warning: {routers[2].nickname} does not have Exit flag", file=sys.stderr)
 
-        # Fetch descriptors for all relays
+        # Fetch descriptors for all routers
         ntor_keys = []
-        for relay in relays:
-            result = _get_ntor_key(relay, consensus)
+        for router in routers:
+            result = _get_ntor_key(router, consensus)
             if result is None:
-                print(f"No ntor-onion-key for {relay.nickname}", file=sys.stderr)
+                print(f"No ntor-onion-key for {router.nickname}", file=sys.stderr)
                 return 1
             ntor_key, source_name, source_type, from_cache = result
             ntor_keys.append(ntor_key)
 
-            # Report source for each relay
+            # Report source for each router
             if from_cache:
                 # Using locally cached microdescriptor
                 if source_type == "dircache":
-                    msg = f"Using {relay.nickname}'s microdescriptor "
+                    msg = f"Using {router.nickname}'s microdescriptor "
                     msg += f"from {source_name} (cache)"
                     print(msg, file=sys.stderr)
                 elif source_type == "authority":
-                    msg = f"Using {relay.nickname}'s microdescriptor "
+                    msg = f"Using {router.nickname}'s microdescriptor "
                     msg += f"from {source_name} (authority)"
                     print(msg, file=sys.stderr)
                 else:
-                    print(f"Using {relay.nickname}'s microdescriptor from cache", file=sys.stderr)
+                    print(f"Using {router.nickname}'s microdescriptor from cache", file=sys.stderr)
             else:
                 # Freshly fetched
                 if source_type == "dircache":
-                    msg = f"Fetched {relay.nickname}'s microdescriptor "
+                    msg = f"Fetched {router.nickname}'s microdescriptor "
                     msg += f"from {source_name} (cache)"
                     print(msg, file=sys.stderr)
                 elif source_type == "authority":
-                    msg = f"Fetched {relay.nickname}'s microdescriptor "
+                    msg = f"Fetched {router.nickname}'s microdescriptor "
                     msg += f"from {source_name} (authority)"
                     print(msg, file=sys.stderr)
                 elif source_type == "descriptor":
-                    msg = f"Fetched {relay.nickname}'s descriptor "
+                    msg = f"Fetched {router.nickname}'s descriptor "
                     msg += f"from {source_name} (authority)"
                     print(msg, file=sys.stderr)
 
         print(f"\nBuilding {num_hops}-hop circuit:")
         roles = ["Guard", "Middle", "Exit"]
-        for i, r in enumerate(relays):
+        for i, r in enumerate(routers):
             print(f"  [{i+1}] {roles[i]}: {r.nickname} ({r.ip}:{r.orport})")
 
-        # Connect to first relay
-        first_relay = relays[0]
-        print(f"\nConnecting to {first_relay.nickname}...")
-        conn = RelayConnection(host=first_relay.ip, port=first_relay.orport, timeout=args.timeout)
+        # Connect to first router
+        first_router = routers[0]
+        print(f"\nConnecting to {first_router.nickname}...")
+        conn = RelayConnection(host=first_router.ip, port=first_router.orport, timeout=args.timeout)
 
         try:
             conn.connect()
@@ -638,19 +678,19 @@ def cmd_circuit(args: argparse.Namespace) -> int:  # pylint: disable=too-many-re
             circuit = Circuit.create(conn)
             print(f"  Circuit ID: {circuit.circ_id:#010x}")
 
-            for i, (relay, ntor_key) in enumerate(zip(relays, ntor_keys, strict=True)):
+            for i, (router, ntor_key) in enumerate(zip(routers, ntor_keys, strict=True)):
                 if i == 0:
                     # First hop - use CREATE2
-                    print(f"\n  Hop {i+1}: Creating circuit to {relay.nickname}...")
-                    if not circuit.extend_to(relay.fingerprint, ntor_key):
+                    print(f"\n  Hop {i+1}: Creating circuit to {router.nickname}...")
+                    if not circuit.extend_to(router.fingerprint, ntor_key):
                         print("    CREATE2 failed", file=sys.stderr)
                         return 1
                     print("    CREATE2/CREATED2 successful")
                 else:
                     # Subsequent hops - use RELAY_EXTEND2
-                    print(f"\n  Hop {i+1}: Extending to {relay.nickname}...")
+                    print(f"\n  Hop {i+1}: Extending to {router.nickname}...")
                     if not circuit.extend_to(
-                        relay.fingerprint, ntor_key, ip=relay.ip, port=relay.orport
+                        router.fingerprint, ntor_key, ip=router.ip, port=router.orport
                     ):
                         print("    EXTEND2 failed", file=sys.stderr)
                         return 1
@@ -671,7 +711,7 @@ def cmd_circuit(args: argparse.Namespace) -> int:  # pylint: disable=too-many-re
                 stream_id = circuit.begin_stream(args.target, args.port)
 
                 if stream_id is None:
-                    print("    Stream rejected by exit relay", file=sys.stderr)
+                    print("    Stream rejected by exit router", file=sys.stderr)
                     circuit.destroy()
                     return 1
 
@@ -710,6 +750,127 @@ def cmd_circuit(args: argparse.Namespace) -> int:  # pylint: disable=too-many-re
                 print("\n  Stream test successful!")
 
             # Clean up
+            circuit.destroy()
+            print("\n  Circuit destroyed")
+            return 0
+
+        except ConnectionError as e:
+            print(f"  Connection error: {e}", file=sys.stderr)
+            return 1
+        finally:
+            conn.close()
+
+    # pylint: disable-next=broad-exception-caught
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        traceback.print_exc()
+        return 1
+
+
+def cmd_resolve(args: argparse.Namespace) -> int:
+    """Resolve a hostname through the Tor network."""
+    try:
+        consensus = get_consensus()
+
+        # Build 3-hop circuit for DNS resolution
+        routers = []
+        used_fingerprints: list[str] = []
+
+        for role in ["guard", "middle", "exit"]:
+            router = _select_random_router(consensus, role, used_fingerprints, port=None)
+            if router is None:
+                print(f"No suitable {role} router found", file=sys.stderr)
+                return 1
+            routers.append(router)
+            used_fingerprints.append(router.fingerprint)
+
+        # Fetch ntor keys for all routers
+        ntor_keys = []
+        for router in routers:
+            result = _get_ntor_key(router, consensus)
+            if result is None:
+                print(f"No ntor-onion-key for {router.nickname}", file=sys.stderr)
+                return 1
+            ntor_key, source_name, source_type, from_cache = result
+            ntor_keys.append(ntor_key)
+
+            # Report source
+            action = "Using" if from_cache else "Fetched"
+            type_label = "cache" if source_type == "dircache" else source_type
+            msg = f"{action} {router.nickname}'s microdescriptor from {source_name} ({type_label})"
+            print(msg, file=sys.stderr)
+
+        print("\nBuilding 3-hop circuit for DNS resolution:")
+        roles = ["Guard", "Middle", "Exit"]
+        for i, r in enumerate(routers):
+            print(f"  [{i+1}] {roles[i]}: {r.nickname} ({r.ip}:{r.orport})")
+
+        # Connect to first router
+        first_router = routers[0]
+        print(f"\nConnecting to {first_router.nickname}...")
+        conn = RelayConnection(host=first_router.ip, port=first_router.orport, timeout=30.0)
+
+        try:
+            conn.connect()
+            print("  TLS connection established")
+
+            if not conn.handshake():
+                print("  Link handshake failed", file=sys.stderr)
+                return 1
+            print(f"  Link protocol: v{conn.link_protocol}")
+
+            # Create circuit and extend through all hops
+            circuit = Circuit.create(conn)
+            print(f"  Circuit ID: {circuit.circ_id:#010x}")
+
+            for i, (router, ntor_key) in enumerate(zip(routers, ntor_keys, strict=True)):
+                if i == 0:
+                    print(f"\n  Hop {i+1}: Creating circuit to {router.nickname}...")
+                    if not circuit.extend_to(router.fingerprint, ntor_key):
+                        print("    CREATE2 failed", file=sys.stderr)
+                        return 1
+                    print("    CREATE2/CREATED2 successful")
+                else:
+                    print(f"\n  Hop {i+1}: Extending to {router.nickname}...")
+                    if not circuit.extend_to(
+                        router.fingerprint, ntor_key, ip=router.ip, port=router.orport
+                    ):
+                        print("    EXTEND2 failed", file=sys.stderr)
+                        return 1
+                    print("    RELAY_EXTEND2/EXTENDED2 successful")
+
+            print(f"\n  Circuit built with {len(circuit.hops)} hops!")
+
+            # Resolve the hostname
+            hostname = args.hostname
+            print(f"\n  Resolving {hostname}...")
+            answers = circuit.resolve(hostname)
+
+            if not answers:
+                print("  Resolution failed - no answers", file=sys.stderr)
+                circuit.destroy()
+                return 1
+
+            # Display results
+            print(f"\n  DNS Resolution Results for {hostname}:")
+            print("  " + "-" * 50)
+            for answer in answers:
+                # Import here to avoid circular import issues
+                # pylint: disable-next=import-outside-toplevel
+                from torscope.onion.relay import ResolvedType
+
+                if answer.addr_type == ResolvedType.IPV4:
+                    print(f"  A     {answer.value} (TTL: {answer.ttl}s)")
+                elif answer.addr_type == ResolvedType.IPV6:
+                    print(f"  AAAA  {answer.value} (TTL: {answer.ttl}s)")
+                elif answer.addr_type == ResolvedType.HOSTNAME:
+                    print(f"  PTR   {answer.value} (TTL: {answer.ttl}s)")
+                elif answer.addr_type == ResolvedType.ERROR_TRANSIENT:
+                    print(f"  ERROR (transient): {answer.value}")
+                elif answer.addr_type == ResolvedType.ERROR_NONTRANSIENT:
+                    print(f"  ERROR (permanent): {answer.value}")
+            print("  " + "-" * 50)
+
             circuit.destroy()
             print("\n  Circuit destroyed")
             return 0
@@ -778,22 +939,26 @@ def main() -> int:
     # fallbacks command
     subparsers.add_parser("fallbacks", help="List fallback directories")
 
-    # relays command
-    relays_parser = subparsers.add_parser("relays", help="List relays from network consensus")
-    relays_parser.add_argument("--flags", metavar="FLAGS", help="Filter by flags (comma-separated)")
+    # routers command
+    routers_parser = subparsers.add_parser("routers", help="List routers from network consensus")
+    routers_parser.add_argument(
+        "--flags", metavar="FLAGS", help="Filter by flags (comma-separated)"
+    )
 
-    # relay command
-    relay_parser = subparsers.add_parser("relay", help="Show details for a specific relay")
-    relay_parser.add_argument(
-        "query", metavar="nickname|fingerprint", help="Relay nickname or fingerprint (partial ok)"
+    # router command
+    router_parser = subparsers.add_parser(
+        "router", help="Show server descriptor for a specific router"
+    )
+    router_parser.add_argument(
+        "query", metavar="nickname|fingerprint", help="Router nickname or fingerprint (partial ok)"
     )
 
     # extra-info command
     extra_info_parser = subparsers.add_parser(
-        "extra-info", help="Show extra-info for a specific relay"
+        "extra-info", help="Show extra-info for a specific router"
     )
     extra_info_parser.add_argument(
-        "query", metavar="nickname|fingerprint", help="Relay nickname or fingerprint"
+        "query", metavar="nickname|fingerprint", help="Router nickname or fingerprint"
     )
 
     # circuit command
@@ -803,9 +968,11 @@ def main() -> int:
     circuit_parser.add_argument(
         "--hops", type=int, choices=[1, 2, 3], default=3, help="Number of hops (default: 3)"
     )
-    circuit_parser.add_argument("--guard", metavar="RELAY", help="Guard relay (default: random)")
-    circuit_parser.add_argument("--middle", metavar="RELAY", help="Middle relay (default: random)")
-    circuit_parser.add_argument("--exit", metavar="RELAY", help="Exit relay (default: random)")
+    circuit_parser.add_argument("--guard", metavar="ROUTER", help="Guard router (default: random)")
+    circuit_parser.add_argument(
+        "--middle", metavar="ROUTER", help="Middle router (default: random)"
+    )
+    circuit_parser.add_argument("--exit", metavar="ROUTER", help="Exit router (default: random)")
     circuit_parser.add_argument("--target", metavar="HOST", help="Target hostname to connect to")
     circuit_parser.add_argument("--port", type=int, metavar="PORT", help="Target port")
     circuit_parser.add_argument(
@@ -815,6 +982,12 @@ def main() -> int:
         "--timeout", type=float, default=30.0, help="Connection timeout (default: 30s)"
     )
     circuit_parser.add_argument("--debug", action="store_true", help="Enable debug output")
+
+    # resolve command
+    resolve_parser = subparsers.add_parser(
+        "resolve", help="Resolve hostname through Tor network (DNS)"
+    )
+    resolve_parser.add_argument("hostname", metavar="HOSTNAME", help="Hostname to resolve")
 
     args = parser.parse_args()
 
@@ -828,10 +1001,11 @@ def main() -> int:
         "clear": cmd_clear,
         "authorities": cmd_authorities,
         "fallbacks": cmd_fallbacks,
-        "relays": cmd_relays,
-        "relay": cmd_relay,
+        "routers": cmd_routers,
+        "router": cmd_router,
         "extra-info": cmd_extra_info,
         "circuit": cmd_circuit,
+        "resolve": cmd_resolve,
     }
 
     try:

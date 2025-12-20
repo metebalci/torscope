@@ -1,6 +1,5 @@
 """Tests for Tor cell format implementation."""
 
-import pytest
 
 from torscope.onion.cell import (
     CELL_LEN_V3,

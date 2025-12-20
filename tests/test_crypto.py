@@ -81,42 +81,63 @@ class TestComputeRsaKeyFingerprint:
         assert fp1 != fp2
 
 
+def create_tor_signature(
+    private_key: rsa.RSAPrivateKey, data: bytes, algorithm: str = "sha1"
+) -> bytes:
+    """Create a signature in Tor's format (PKCS#1 v1.5 with raw hash, no DigestInfo OID)."""
+    import hashlib
+
+    # Compute the hash
+    if algorithm == "sha256":
+        hash_bytes = hashlib.sha256(data).digest()
+    else:
+        hash_bytes = hashlib.sha1(data).digest()
+
+    # Get key size
+    key_size_bytes = private_key.key_size // 8
+
+    # Build PKCS#1 v1.5 padded message: 00 01 [FF...] 00 [hash]
+    # Calculate padding length
+    padding_len = key_size_bytes - 3 - len(hash_bytes)  # 3 = 00 01 ... 00
+
+    # Build the padded message
+    padded = bytes([0, 1]) + (b"\xff" * padding_len) + bytes([0]) + hash_bytes
+
+    # RSA sign (raw RSA operation)
+    padded_int = int.from_bytes(padded, "big")
+    numbers = private_key.private_numbers()
+    signature_int = pow(padded_int, numbers.d, numbers.public_numbers.n)
+    signature = signature_int.to_bytes(key_size_bytes, "big")
+
+    return signature
+
+
 class TestVerifyRsaSignature:
-    """Tests for verify_rsa_signature function."""
+    """Tests for verify_rsa_signature function.
+
+    Note: Tor uses a non-standard PKCS#1 v1.5 format with raw hashes
+    (no DigestInfo OID), so we need to create signatures in that format.
+    """
 
     def test_valid_signature_sha1(self) -> None:
-        """Test verifying a valid SHA1 signature."""
-        from cryptography.hazmat.primitives import hashes
-        from cryptography.hazmat.primitives.asymmetric import padding
-
+        """Test verifying a valid SHA1 signature in Tor format."""
         private_key, pem = generate_test_keypair()
         data = b"test data to sign"
 
-        # Create signature
-        signature = private_key.sign(
-            data,
-            padding.PKCS1v15(),
-            hashes.SHA1(),
-        )
+        # Create signature in Tor's format (raw hash, no DigestInfo OID)
+        signature = create_tor_signature(private_key, data, "sha1")
 
         # Verify
         public_key = load_rsa_public_key(pem)
         assert verify_rsa_signature(public_key, signature, data, "sha1") is True
 
     def test_valid_signature_sha256(self) -> None:
-        """Test verifying a valid SHA256 signature."""
-        from cryptography.hazmat.primitives import hashes
-        from cryptography.hazmat.primitives.asymmetric import padding
-
+        """Test verifying a valid SHA256 signature in Tor format."""
         private_key, pem = generate_test_keypair()
         data = b"test data to sign"
 
-        # Create signature
-        signature = private_key.sign(
-            data,
-            padding.PKCS1v15(),
-            hashes.SHA256(),
-        )
+        # Create signature in Tor's format (raw hash, no DigestInfo OID)
+        signature = create_tor_signature(private_key, data, "sha256")
 
         # Verify
         public_key = load_rsa_public_key(pem)
@@ -133,18 +154,11 @@ class TestVerifyRsaSignature:
 
     def test_wrong_data(self) -> None:
         """Test that signature doesn't verify with wrong data."""
-        from cryptography.hazmat.primitives import hashes
-        from cryptography.hazmat.primitives.asymmetric import padding
-
         private_key, pem = generate_test_keypair()
         data = b"original data"
         wrong_data = b"different data"
 
-        signature = private_key.sign(
-            data,
-            padding.PKCS1v15(),
-            hashes.SHA1(),
-        )
+        signature = create_tor_signature(private_key, data, "sha1")
 
         public_key = load_rsa_public_key(pem)
         assert verify_rsa_signature(public_key, signature, wrong_data, "sha1") is False
@@ -155,17 +169,11 @@ class TestVerifyConsensusSignature:
 
     def test_valid_signature_with_pem_headers(self) -> None:
         """Test verifying signature with PEM-style headers."""
-        from cryptography.hazmat.primitives import hashes
-        from cryptography.hazmat.primitives.asymmetric import padding
-
         private_key, pem = generate_test_keypair()
         data = b"network-status-version 3\ntest data\n"
 
-        signature = private_key.sign(
-            data,
-            padding.PKCS1v15(),
-            hashes.SHA1(),
-        )
+        # Create signature in Tor's format
+        signature = create_tor_signature(private_key, data, "sha1")
 
         sig_b64 = (
             "-----BEGIN SIGNATURE-----\n"
@@ -181,7 +189,14 @@ class TestVerifyConsensusSignature:
 
 
 class TestExtractSignedPortion:
-    """Tests for extract_signed_portion function."""
+    """Tests for extract_signed_portion function.
+
+    Note: The signed portion is the same for all signatures in a consensus document.
+    The identity parameter is kept for API compatibility but is ignored.
+    According to Tor spec, the signed portion is from 'network-status-version'
+    through the space after 'directory-signature' (sha1) or
+    'directory-signature sha256' (sha256).
+    """
 
     def test_extract_simple_document(self) -> None:
         """Test extracting signed portion from simple document."""
@@ -195,10 +210,16 @@ dGVzdA==
         signed = extract_signed_portion(doc, "ABC123", "sha1")
         assert signed is not None
         assert signed.startswith(b"network-status-version")
-        assert b"directory-signature ABC123" in signed
+        # The signed portion ends at "directory-signature " (with space)
+        assert signed.endswith(b"directory-signature ")
 
     def test_extract_with_algorithm(self) -> None:
-        """Test extracting with algorithm in signature line."""
+        """Test extracting with algorithm in signature line.
+
+        The signed portion always ends at 'directory-signature ' regardless
+        of what algorithm is specified in the signature line. The algorithm
+        only indicates which hash to use on the signed portion.
+        """
         doc = """network-status-version 3
 vote-status consensus
 directory-signature sha256 ABC123 DEF456
@@ -208,10 +229,17 @@ dGVzdA==
 """
         signed = extract_signed_portion(doc, "ABC123", "sha256")
         assert signed is not None
-        assert b"directory-signature sha256 ABC123" in signed
+        # The signed portion ends at "directory-signature " (with space)
+        # NOT at "directory-signature sha256 " - the algorithm is part of the
+        # unsigned portion
+        assert signed.endswith(b"directory-signature ")
 
     def test_extract_multiple_signatures(self) -> None:
-        """Test extracting when multiple signatures exist."""
+        """Test extracting when multiple signatures exist.
+
+        The signed portion uses the FIRST occurrence of the end marker,
+        regardless of which identity is specified.
+        """
         doc = """network-status-version 3
 vote-status consensus
 directory-signature FIRST111 KEY111
@@ -223,23 +251,37 @@ directory-signature SECOND22 KEY222
 c2lnMg==
 -----END SIGNATURE-----
 """
-        # Should find the second signature
-        signed = extract_signed_portion(doc, "SECOND22", "sha1")
-        assert signed is not None
-        assert b"directory-signature SECOND22" in signed
+        # Both identities should return the same signed portion
+        # (ending at the FIRST "directory-signature ")
+        signed1 = extract_signed_portion(doc, "FIRST111", "sha1")
+        signed2 = extract_signed_portion(doc, "SECOND22", "sha1")
+        assert signed1 is not None
+        assert signed2 is not None
+        assert signed1 == signed2
+        assert signed1.endswith(b"directory-signature ")
 
-    def test_extract_not_found(self) -> None:
-        """Test that missing identity returns None."""
+    def test_extract_identity_ignored(self) -> None:
+        """Test that identity parameter is ignored."""
         doc = """network-status-version 3
 directory-signature ABC123 DEF456
 """
+        # Identity is ignored, so any value (including non-existent) works
         signed = extract_signed_portion(doc, "NOTFOUND", "sha1")
-        assert signed is None
+        assert signed is not None
+        assert signed.endswith(b"directory-signature ")
 
     def test_extract_no_version(self) -> None:
         """Test that missing network-status-version returns None."""
         doc = """vote-status consensus
 directory-signature ABC123 DEF456
+"""
+        signed = extract_signed_portion(doc, "ABC123", "sha1")
+        assert signed is None
+
+    def test_extract_no_signature(self) -> None:
+        """Test that missing directory-signature returns None."""
+        doc = """network-status-version 3
+vote-status consensus
 """
         signed = extract_signed_portion(doc, "ABC123", "sha1")
         assert signed is None

@@ -28,10 +28,13 @@ from torscope.onion.relay import (
     RelayCommand,
     RelayCrypto,
     RelayEndReason,
+    ResolvedAnswer,
     create_begin_payload,
     create_end_payload,
     create_extend2_payload,
+    create_resolve_payload,
     parse_extended2_payload,
+    parse_resolved_payload,
 )
 
 
@@ -193,7 +196,7 @@ class Circuit:
         self.state = CircuitState.FAILED
         return False
 
-    def _extend_circuit(  # pylint: disable=too-many-arguments
+    def _extend_circuit(
         self,
         fingerprint: str,
         ntor_onion_key: bytes,
@@ -475,6 +478,53 @@ class Circuit:
 
         # Unexpected response
         return None
+
+    def resolve(self, hostname: str) -> list[ResolvedAnswer]:
+        """
+        Resolve a hostname via the exit relay (RELAY_RESOLVE).
+
+        This sends a DNS resolution request through the circuit to the
+        exit relay. The relay performs the DNS lookup and returns results.
+        No actual stream is created - only the resolution is performed.
+
+        For reverse DNS lookups, pass an in-addr.arpa address.
+
+        Args:
+            hostname: Hostname to resolve (e.g., "example.com")
+
+        Returns:
+            List of ResolvedAnswer objects containing resolved addresses.
+            Empty list if resolution failed.
+        """
+        # RESOLVE uses a stream ID that must match the RESOLVED response
+        # but no actual stream is created
+        stream_id = self._allocate_stream_id()
+
+        # Send RELAY_RESOLVE
+        resolve_cell = RelayCell(
+            relay_command=RelayCommand.RESOLVE,
+            stream_id=stream_id,
+            data=create_resolve_payload(hostname),
+        )
+        self.send_relay(resolve_cell)
+
+        # Wait for RELAY_RESOLVED
+        response = self.recv_relay()
+        if response is None:
+            return []
+
+        if response.relay_command == RelayCommand.RESOLVED:
+            if response.stream_id != stream_id:
+                # Mismatched stream ID
+                return []
+            return parse_resolved_payload(response.data)
+
+        if response.relay_command == RelayCommand.END:
+            # Resolution failed
+            return []
+
+        # Unexpected response
+        return []
 
     def end_stream(self, stream_id: int, reason: RelayEndReason = RelayEndReason.DONE) -> None:
         """

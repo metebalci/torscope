@@ -2,11 +2,8 @@
 
 from datetime import datetime
 
-import pytest
-
 from torscope.directory.certificates import KeyCertificateParser
 from torscope.directory.models import KeyCertificate
-
 
 # Sample key certificate for testing
 SAMPLE_CERTIFICATE = """dir-key-certificate-version 3

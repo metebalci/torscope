@@ -527,3 +527,103 @@ def parse_extended2_payload(payload: bytes) -> bytes:
     """
     hlen = struct.unpack(">H", payload[0:2])[0]
     return payload[2 : 2 + hlen]
+
+
+class ResolvedType(IntEnum):
+    """Address types in RELAY_RESOLVED response."""
+
+    HOSTNAME = 0x00  # Hostname (DNS order, not NUL-terminated)
+    IPV4 = 0x04  # IPv4 address (4 bytes)
+    IPV6 = 0x06  # IPv6 address (16 bytes)
+    ERROR_TRANSIENT = 0xF0  # Transient error
+    ERROR_NONTRANSIENT = 0xF1  # Non-transient error
+
+
+@dataclass
+class ResolvedAnswer:
+    """A single answer from RELAY_RESOLVED response."""
+
+    addr_type: ResolvedType
+    value: str  # IP address, hostname, or error description
+    ttl: int  # Time-to-live in seconds
+
+
+def create_resolve_payload(hostname: str) -> bytes:
+    """
+    Create payload for RELAY_RESOLVE cell.
+
+    Args:
+        hostname: Hostname to resolve (or in-addr.arpa for reverse lookup)
+
+    Returns:
+        RESOLVE cell payload (NUL-terminated hostname)
+    """
+    return hostname.encode("ascii") + b"\x00"
+
+
+def parse_resolved_payload(payload: bytes) -> list[ResolvedAnswer]:
+    """
+    Parse RELAY_RESOLVED payload into a list of answers.
+
+    Each answer has format: type(1) + length(1) + value(variable) + TTL(4)
+
+    Args:
+        payload: RESOLVED cell payload
+
+    Returns:
+        List of ResolvedAnswer objects
+    """
+    answers = []
+    offset = 0
+
+    while offset < len(payload):
+        # Need at least 6 bytes for header (type + length + TTL)
+        if offset + 2 > len(payload):
+            break
+
+        addr_type = payload[offset]
+        length = payload[offset + 1]
+        offset += 2
+
+        # Check if we have enough data for value + TTL
+        if offset + length + 4 > len(payload):
+            break
+
+        value_bytes = payload[offset : offset + length]
+        offset += length
+
+        ttl = struct.unpack(">I", payload[offset : offset + 4])[0]
+        offset += 4
+
+        # Convert value to string based on type
+        try:
+            resolved_type = ResolvedType(addr_type)
+        except ValueError:
+            # Unknown type, skip
+            continue
+
+        if resolved_type == ResolvedType.IPV4:
+            # 4 bytes -> dotted quad
+            if len(value_bytes) == 4:
+                value = ".".join(str(b) for b in value_bytes)
+            else:
+                continue
+        elif resolved_type == ResolvedType.IPV6:
+            # 16 bytes -> hex with colons
+            if len(value_bytes) == 16:
+                parts = [f"{value_bytes[i]:02x}{value_bytes[i+1]:02x}" for i in range(0, 16, 2)]
+                value = ":".join(parts)
+            else:
+                continue
+        elif resolved_type == ResolvedType.HOSTNAME:
+            # DNS order, not NUL-terminated
+            value = value_bytes.decode("ascii", errors="replace")
+        elif resolved_type in (ResolvedType.ERROR_TRANSIENT, ResolvedType.ERROR_NONTRANSIENT):
+            # Error content is typically ignored
+            value = value_bytes.decode("ascii", errors="replace") if value_bytes else "error"
+        else:
+            continue
+
+        answers.append(ResolvedAnswer(addr_type=resolved_type, value=value, ttl=ttl))
+
+    return answers

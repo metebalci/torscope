@@ -89,7 +89,10 @@ def verify_rsa_signature(
     algorithm: str = "sha1",
 ) -> bool:
     """
-    Verify an RSA signature.
+    Verify an RSA signature using Tor's format.
+
+    Tor uses PKCS#1 v1.5 padding but with raw hashes (no DigestInfo OID).
+    Format: 00 01 [FF padding] 00 [raw hash]
 
     Args:
         public_key: RSA public key
@@ -100,22 +103,40 @@ def verify_rsa_signature(
     Returns:
         True if signature is valid, False otherwise
     """
-    # Select hash algorithm
-    hash_algo: hashes.HashAlgorithm
-    if algorithm == "sha256":
-        hash_algo = hashes.SHA256()
-    else:
-        hash_algo = hashes.SHA1()
-
     try:
-        # Tor uses PKCS#1 v1.5 padding
-        public_key.verify(
-            signature,
-            data,
-            padding.PKCS1v15(),
-            hash_algo,
-        )
-        return True
+        # Compute expected hash
+        if algorithm == "sha256":
+            expected_hash = hashlib.sha256(data).digest()
+        else:
+            expected_hash = hashlib.sha1(data).digest()
+
+        # RSA decrypt to get the padded hash
+        numbers = public_key.public_numbers()
+        sig_int = int.from_bytes(signature, "big")
+        decrypted_int = pow(sig_int, numbers.e, numbers.n)
+        key_size_bytes = (public_key.key_size + 7) // 8
+        decrypted = decrypted_int.to_bytes(key_size_bytes, "big")
+
+        # Verify PKCS#1 v1.5 padding: 00 01 [FF...] 00 [hash]
+        if len(decrypted) < 11:
+            return False
+        if decrypted[0] != 0 or decrypted[1] != 1:
+            return False
+
+        # Find the 00 separator after FF padding
+        sep_idx = decrypted.find(b"\x00", 2)
+        if sep_idx < 10:  # Must have at least 8 bytes of FF padding
+            return False
+
+        # Check padding is all FF
+        if decrypted[2:sep_idx] != b"\xff" * (sep_idx - 2):
+            return False
+
+        # Extract hash from signature
+        actual_hash = decrypted[sep_idx + 1 :]
+
+        # Compare hashes
+        return actual_hash == expected_hash
     # pylint: disable-next=broad-exception-caught
     except Exception:
         return False
@@ -164,65 +185,53 @@ def verify_consensus_signature(
 
 def extract_signed_portion(
     consensus_text: str,
-    signature_identity: str,
+    signature_identity: str,  # pylint: disable=unused-argument
     signature_algorithm: str = "sha1",  # pylint: disable=unused-argument
 ) -> bytes | None:
     """
     Extract the portion of a consensus document that was signed.
 
-    According to Tor spec, the signed portion is from "network-status-version"
-    through the space after "directory-signature" (before the newline).
+    According to Tor source code (router_get_networkstatus_v3_signed_boundaries),
+    the signed portion is from "network-status-version" (at line start) through
+    the first space after "\\ndirectory-signature". This is the SAME for all
+    signatures regardless of algorithm (sha1/sha256).
+
+    The algorithm parameter only indicates which hash function to use on the
+    signed portion, not where the signed portion ends.
 
     Args:
         consensus_text: Full consensus document text
-        signature_identity: The identity fingerprint of the signing authority
-        signature_algorithm: Algorithm used ("sha1" or "sha256")
+        signature_identity: The identity fingerprint (unused - kept for API compatibility)
+        signature_algorithm: Algorithm used (unused - boundaries are same for all)
 
     Returns:
         The signed portion as bytes, or None if not found
     """
-    # Find the start: "network-status-version"
+    # Find the start: "network-status-version" at line start
     start_marker = "network-status-version"
-    start_idx = consensus_text.find(start_marker)
-    if start_idx == -1:
+    start_idx = 0
+    while True:
+        idx = consensus_text.find(start_marker, start_idx)
+        if idx == -1:
+            return None
+        # Check if at line start (idx == 0 or preceded by newline)
+        if idx == 0 or consensus_text[idx - 1] == "\n":
+            start_idx = idx
+            break
+        start_idx = idx + 1
+
+    # Find end: "\ndirectory-signature" then first space after it
+    end_marker = "\ndirectory-signature"
+    end_str_idx = consensus_text.find(end_marker, start_idx)
+    if end_str_idx == -1:
         return None
 
-    # Find the specific directory-signature line for this identity
-    # Format: "directory-signature [algorithm] identity signing-key-digest"
-    search_start = start_idx
-    while True:
-        sig_marker = "directory-signature"
-        sig_idx = consensus_text.find(sig_marker, search_start)
-        if sig_idx == -1:
-            return None
+    # Find first space after the end marker
+    space_idx = consensus_text.find(" ", end_str_idx + len(end_marker))
+    if space_idx == -1:
+        return None
 
-        # Get the line
-        line_end = consensus_text.find("\n", sig_idx)
-        if line_end == -1:
-            line_end = len(consensus_text)
-        line = consensus_text[sig_idx:line_end]
-
-        # Check if this signature line matches our identity
-        parts = line.split()
-        if len(parts) >= 3:
-            # Check algorithm and identity
-            if len(parts) == 3:
-                # No algorithm specified: directory-signature identity signing-key
-                line_identity = parts[1]
-            else:
-                # Algorithm specified: directory-signature algorithm identity signing-key
-                line_identity = parts[2]
-
-            if line_identity == signature_identity:
-                # Found the right signature line
-                # Signed portion ends after the space following "directory-signature ..."
-                # but before the newline
-                end_idx = line_end
-                signed_text = consensus_text[start_idx:end_idx]
-                # Add newline as per spec (through the newline after the sig line)
-                signed_text += "\n"
-                return signed_text.encode("utf-8")
-
-        search_start = line_end + 1
-
-    return None
+    # End is right after the space (inclusive)
+    end_idx = space_idx + 1
+    signed_text = consensus_text[start_idx:end_idx]
+    return signed_text.encode("utf-8")

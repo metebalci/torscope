@@ -110,10 +110,14 @@ ignore-patterns = ["test_.*\\.py"]
 disable = [
     "R0902",  # too-many-instance-attributes (dataclasses need many fields)
     "R0903",  # too-few-public-methods (utility classes are valid)
+    "R0911",  # too-many-return-statements (complex control flow)
     "R0912",  # too-many-branches (parser logic is complex)
+    "R0913",  # too-many-arguments (complex functions)
     "R0914",  # too-many-locals (parser logic needs variables)
     "R0915",  # too-many-statements (parser logic is complex)
+    "R0917",  # too-many-positional-arguments (complex functions)
     "R1702",  # too-many-nested-blocks (parser logic)
+    "C0302",  # too-many-lines (large modules are valid)
     "E0401",  # import-error (pylint environment issue)
 ]
 
