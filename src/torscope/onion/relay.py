@@ -627,3 +627,166 @@ def parse_resolved_payload(payload: bytes) -> list[ResolvedAnswer]:
         answers.append(ResolvedAnswer(addr_type=resolved_type, value=value, ttl=ttl))
 
     return answers
+
+
+# =============================================================================
+# Hidden Service Rendezvous Helpers
+# =============================================================================
+
+
+class IntroduceAckStatus(IntEnum):
+    """Status codes for INTRODUCE_ACK response."""
+
+    SUCCESS = 0x0000
+    SERVICE_NOT_RECOGNIZED = 0x0001
+    BAD_MESSAGE_FORMAT = 0x0002
+    RELAY_FAILED = 0x0003
+
+
+def create_establish_rendezvous_payload(rendezvous_cookie: bytes) -> bytes:
+    """Create payload for RELAY_ESTABLISH_RENDEZVOUS cell.
+
+    Args:
+        rendezvous_cookie: 20-byte random cookie
+
+    Returns:
+        20-byte payload (just the cookie)
+    """
+    if len(rendezvous_cookie) != 20:
+        raise ValueError("rendezvous_cookie must be 20 bytes")
+    return rendezvous_cookie
+
+
+def create_introduce1_payload(
+    auth_key: bytes,
+    client_pk: bytes,
+    encrypted_data: bytes,
+    mac: bytes,
+) -> bytes:
+    """Create payload for RELAY_INTRODUCE1 cell.
+
+    Format:
+        LEGACY_KEY_ID      [20 bytes] - All zeros for v3
+        AUTH_KEY_TYPE      [1 byte]   - 0x02 = Ed25519
+        AUTH_KEY_LEN       [2 bytes]
+        AUTH_KEY           [AUTH_KEY_LEN bytes]
+        N_EXTENSIONS       [1 byte]   - 0
+        ENCRYPTED:
+            CLIENT_PK      [32 bytes]
+            ENCRYPTED_DATA [variable]
+            MAC            [32 bytes]
+
+    Args:
+        auth_key: 32-byte Ed25519 auth key from intro point
+        client_pk: 32-byte X25519 ephemeral public key
+        encrypted_data: Encrypted introduce data
+        mac: 32-byte MAC
+
+    Returns:
+        INTRODUCE1 cell payload
+    """
+    if len(auth_key) != 32:
+        raise ValueError("auth_key must be 32 bytes")
+    if len(client_pk) != 32:
+        raise ValueError("client_pk must be 32 bytes")
+    if len(mac) != 32:
+        raise ValueError("mac must be 32 bytes")
+
+    payload = bytearray()
+
+    # LEGACY_KEY_ID [20 bytes] - all zeros for v3
+    payload.extend(b"\x00" * 20)
+
+    # AUTH_KEY_TYPE [1 byte] - 0x02 = Ed25519
+    payload.append(0x02)
+
+    # AUTH_KEY_LEN [2 bytes]
+    payload.extend(struct.pack(">H", len(auth_key)))
+
+    # AUTH_KEY [32 bytes]
+    payload.extend(auth_key)
+
+    # N_EXTENSIONS [1 byte] - no extensions
+    payload.append(0)
+
+    # ENCRYPTED section
+    payload.extend(client_pk)  # CLIENT_PK [32 bytes]
+    payload.extend(encrypted_data)  # ENCRYPTED_DATA
+    payload.extend(mac)  # MAC [32 bytes]
+
+    return bytes(payload)
+
+
+def parse_introduce_ack(payload: bytes) -> tuple[IntroduceAckStatus, bool]:
+    """Parse RELAY_INTRODUCE_ACK payload.
+
+    Format:
+        STATUS           [2 bytes]
+        N_EXTENSIONS     [1 byte]
+        (extensions...)
+
+    Args:
+        payload: INTRODUCE_ACK cell payload
+
+    Returns:
+        Tuple of (status, success)
+    """
+    if len(payload) < 2:
+        return IntroduceAckStatus.BAD_MESSAGE_FORMAT, False
+
+    status = struct.unpack(">H", payload[:2])[0]
+
+    try:
+        status_enum = IntroduceAckStatus(status)
+    except ValueError:
+        status_enum = IntroduceAckStatus.BAD_MESSAGE_FORMAT
+
+    success = status_enum == IntroduceAckStatus.SUCCESS
+    return status_enum, success
+
+
+def parse_rendezvous2(payload: bytes) -> tuple[bytes, bytes] | None:
+    """Parse RELAY_RENDEZVOUS2 payload.
+
+    Format:
+        HANDSHAKE_INFO [variable]:
+            SERVER_PK  [32 bytes]
+            AUTH       [32 bytes]
+
+    Args:
+        payload: RENDEZVOUS2 cell payload
+
+    Returns:
+        Tuple of (server_pk, auth) or None if invalid
+    """
+    if len(payload) < 64:
+        return None
+
+    server_pk = payload[:32]
+    auth = payload[32:64]
+    return server_pk, auth
+
+
+def link_specifiers_from_intro_point(
+    link_specs: list[tuple[int, bytes]],
+) -> list[LinkSpecifier]:
+    """Convert introduction point link specifiers to LinkSpecifier objects.
+
+    Args:
+        link_specs: List of (type, data) tuples from IntroductionPoint
+
+    Returns:
+        List of LinkSpecifier objects
+    """
+    result = []
+    for spec_type, data in link_specs:
+        try:
+            ls_type = LinkSpecifierType(spec_type)
+            result.append(LinkSpecifier(spec_type=ls_type, data=data))
+        except ValueError:
+            # Unknown type - create with the raw int value
+            # LinkSpecifier.spec_type accepts LinkSpecifierType but we need to handle
+            # unknown types, so we create with the known type and override
+            result.append(LinkSpecifier(spec_type=LinkSpecifierType.TLS_TCP_IPV4, data=data))
+            result[-1].spec_type = spec_type  # type: ignore[assignment]
+    return result

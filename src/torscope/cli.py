@@ -35,6 +35,7 @@ from torscope.directory.or_client import fetch_ntor_key
 from torscope.onion.address import OnionAddress, get_current_time_period, get_time_period_info
 from torscope.onion.circuit import Circuit
 from torscope.onion.connection import RelayConnection
+from torscope.onion.rendezvous import RendezvousError, rendezvous_connect
 from torscope.path import PathSelector
 
 
@@ -1108,9 +1109,64 @@ def cmd_hidden_service(args: argparse.Namespace) -> int:
         else:
             print(f"\n[Descriptor decryption failed: {descriptor.decryption_error}]")
 
-        # TODO: Rendezvous (if --connect)
+        # Rendezvous protocol (if --connect)
         if args.connect:
-            print("\n[Rendezvous protocol not yet implemented]")
+            if not descriptor.decrypted or not descriptor.introduction_points:
+                print("\nCannot connect: descriptor not decrypted or no introduction points")
+                return 1
+
+            port = args.connect
+            print(f"\nConnecting to {onion.address}:{port}...")
+
+            try:
+                verbose = getattr(args, "debug", False)
+                rend_result = rendezvous_connect(
+                    consensus=consensus,
+                    onion_address=onion,
+                    introduction_points=descriptor.introduction_points,
+                    subcredential=subcredential,
+                    timeout=args.timeout,
+                    verbose=verbose,
+                )
+
+                print(f"\nConnected! Opening stream to port {port}...")
+                stream_id = rend_result.circuit.begin_stream(onion.address, port)
+                if stream_id is None:
+                    print("Failed to open stream")
+                    rend_result.circuit.destroy()
+                    rend_result.connection.close()
+                    return 1
+
+                print(f"Stream opened (id={stream_id})")
+
+                # Simple HTTP GET as a test
+                request = f"GET / HTTP/1.0\r\nHost: {onion.address}\r\n\r\n"
+                rend_result.circuit.send_data(stream_id, request.encode())
+
+                # Read response
+                response_data = b""
+                for _ in range(100):
+                    chunk = rend_result.circuit.recv_data(stream_id)
+                    if chunk is None:
+                        break
+                    response_data += chunk
+
+                if response_data:
+                    # Show first part of response
+                    text = response_data.decode("utf-8", errors="replace")
+                    lines = text.split("\n")
+                    print("\nResponse:")
+                    for line in lines[:20]:
+                        print(f"  {line}")
+                    if len(lines) > 20:
+                        print(f"  ... ({len(lines) - 20} more lines)")
+
+                rend_result.circuit.destroy()
+                rend_result.connection.close()
+
+            except RendezvousError as e:
+                print(f"\nRendezvous failed: {e}")
+                return 1
 
         return 0
 

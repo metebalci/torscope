@@ -126,6 +126,7 @@ disable = [
     "W0621",  # redefined-outer-name (intentional reimport)
     "W0404",  # reimported (intentional in crypto module)
     "E0401",  # import-error (pylint environment issue)
+    "R0801",  # duplicate-code (circuit building patterns are intentionally similar)
 ]
 
 [tool.pylint.format]

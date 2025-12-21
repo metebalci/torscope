@@ -657,9 +657,12 @@ def _parse_introduction_points(plaintext: bytes) -> list[IntroductionPoint]:
                         cert_lines.append(lines[i].strip())
                     i += 1
                 cert_data = base64.b64decode("".join(cert_lines))
-                # Extract the auth key from the cert (key is at offset 39, 32 bytes)
-                if len(cert_data) >= 71:
-                    current_ip.auth_key = cert_data[39:71]
+                # Extract the auth key from the cert
+                # Ed25519 cert format: VERSION(1) + CERT_TYPE(1) + EXPIRATION(4) +
+                # KEY_TYPE(1) + CERTIFIED_KEY(32) + ...
+                # CERTIFIED_KEY is at offset 7, length 32 bytes
+                if len(cert_data) >= 39:
+                    current_ip.auth_key = cert_data[7:39]
 
         i += 1
 

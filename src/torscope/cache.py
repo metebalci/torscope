@@ -248,6 +248,41 @@ def get_ntor_key_from_cache(digest: str) -> tuple[bytes, str, str] | None:
     return ntor_key, source_name, source_type
 
 
+def get_ed25519_from_cache(digest: str) -> bytes | None:
+    """
+    Get Ed25519 identity for a relay from cached microdescriptor.
+
+    Args:
+        digest: Base64-encoded microdescriptor digest
+
+    Returns:
+        32-byte Ed25519 identity or None if not cached
+    """
+    cache = _load_microdesc_cache()
+
+    # Try both with and without trailing '='
+    digest_stripped = digest.rstrip("=")
+    digest_padded = digest_stripped + "=" * ((4 - len(digest_stripped) % 4) % 4)
+
+    entry = cache.get(digest_padded) or cache.get(digest_stripped)
+    if entry is None:
+        return None
+
+    ed25519_b64 = entry.get("ed25519_identity")
+    if ed25519_b64 is None:
+        return None
+
+    # Decode base64 key (add padding if needed)
+    padding = (4 - len(ed25519_b64) % 4) % 4
+    if padding:
+        ed25519_b64 += "=" * padding
+
+    try:
+        return base64.b64decode(ed25519_b64)
+    except ValueError:
+        return None
+
+
 def get_cached_microdesc_count() -> int:
     """Get number of cached microdescriptors."""
     return len(_load_microdesc_cache())
