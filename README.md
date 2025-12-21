@@ -1,12 +1,10 @@
-# torscope
+# Overview
 
-A tool for exploring and getting information about the Tor network.
+torscope is a tool for exploring the [Tor network](https://en.wikipedia.org/wiki/Tor_(network)).
 
-## Overview
+It implements the Tor directory protocol and OR (Onion Router) protocol, allowing you to explore relay information, create circuits, and study the Tor specification in practice.
 
-`torscope` is a Python command-line tool for fetching and analyzing information about the Tor network. It implements the Tor directory protocol and OR (Onion Router) protocol, allowing you to explore relay information, create circuits, and study the Tor specification in practice.
-
-## Features
+# Features
 
 - **Directory Protocol**
   - List all Tor directory authorities and fallback directories
@@ -21,23 +19,24 @@ A tool for exploring and getting information about the Tor network.
   - Create circuits using the ntor handshake (Curve25519 key exchange)
   - Derive encryption keys for circuit communication
 
-## Installation
+# Installation
 
 ```bash
 pip install torscope
 ```
 
-## Usage
+# Usage
 
 ## Example Onion Addresses
 
+- 2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion
 - duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion
 - protonmailrmez3lotccipshtkleegetolb73fuirgj7r4o4vfu7ozyd.onion
 - dwnewsgngmhlplxy6o2twtfgjnrnjxbegbwqx6wnotdhkzt562tszfid.onion
 
-## License
+# License
 
-torscope Tor Network Information Tool
+torscope Tor Network Exploration Tool
 
 Copyright (C) 2025-2026 Mete Balci
 
@@ -54,8 +53,7 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-## References
+# References
 
 - [Tor Specification](https://spec.torproject.org/tor-spec/index.html)
 - [Tor Directory Specification](https://spec.torproject.org/dir-spec/index.html)
-- [ntor Handshake (Proposal 216)](https://spec.torproject.org/proposals/216-ntor-handshake.html)

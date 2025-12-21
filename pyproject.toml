@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "torscope"
 dynamic = ["version"]
-description = "A tool for exploring and getting information about the Tor network"
+description = "A tool for exploring the Tor network"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "GPL-3.0-or-later"
@@ -23,7 +23,7 @@ classifiers = [
     "Topic :: System :: Networking",
     "Topic :: Internet",
 ]
-keywords = ["tor", "onion", "routing", "privacy", "anonymity", "network", "information"]
+keywords = ["tor", "onion", "routing", "privacy", "anonymity", "network", "information", "explore"]
 dependencies = [
     "httpx>=0.25.0",
     "cryptography>=41.0.0",
