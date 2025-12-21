@@ -978,19 +978,47 @@ def cmd_hidden_service(args: argparse.Namespace) -> int:
             print("Error: No current SRV in consensus (needed for HSDir ring)", file=sys.stderr)
             return 1
 
-        # Compute blinded key for this time period (no SRV needed)
+        # Compute blinded key and subcredential for this time period
         blinded_key = onion.compute_blinded_key(tp)
+        subcredential = onion.compute_subcredential(tp)
         print(f"\nBlinded Key (period {tp}): {blinded_key.hex()}")
 
-        # Build HSDir hashring using shared_rand_current
-        # use_second_srv=False means use shared_rand_current
-        hsdir_ring = HSDirectoryRing(consensus, tp, use_second_srv=False, ed25519_map=ed25519_map)
+        # Build HSDir hashring using the SRV from the period start.
+        # The SRV voting happens every 12 hours (00:00 and 12:00 UTC).
+        # Time periods are 24 hours starting at 12:00 UTC.
+        #
+        # Each time period has a "matching SRV" - the one voted at period start (12:00 UTC).
+        # But the consensus fields (shared_rand_current/previous) shift as new votes happen:
+        #
+        # First half of period (12:00 UTC - 00:00 UTC next day):
+        #   - No new SRV vote has happened since period start
+        #   - shared_rand_current = SRV from period start (use this)
+        #   - shared_rand_previous = older SRV
+        #
+        # Second half of period (00:00 UTC - 12:00 UTC):
+        #   - A new SRV vote happened at 00:00 UTC
+        #   - shared_rand_current = new SRV (don't use this)
+        #   - shared_rand_previous = SRV from period start (use this)
+        #
+        # See: https://spec.torproject.org/rend-spec/shared-random.html
+        hours_into_period = period_info["remaining_minutes"] / 60
+        hours_into_period = 24 - hours_into_period  # Convert remaining to elapsed
+        use_previous_srv = hours_into_period >= 12  # Second half of period
+
+        if getattr(args, "debug", False):
+            srv_choice = "previous" if use_previous_srv else "current"
+            print(f"[debug] Hours into period: {hours_into_period:.1f}, using SRV {srv_choice}")
+
+        hsdir_ring = HSDirectoryRing(
+            consensus, tp, use_second_srv=use_previous_srv, ed25519_map=ed25519_map
+        )
 
         if hsdir_ring.size == 0:
             print("Error: No HSDirs in ring", file=sys.stderr)
             return 1
 
-        print(f"\nHSDir Ring (using SRV current, period {tp}): {hsdir_ring.size} relays")
+        srv_label = "previous" if use_previous_srv else "current"
+        print(f"\nHSDir Ring (using SRV {srv_label}, period {tp}): {hsdir_ring.size} relays")
 
         # Find responsible HSDirs (or use manually specified one)
         if args.hsdir:
@@ -1006,35 +1034,53 @@ def cmd_hidden_service(args: argparse.Namespace) -> int:
             # Automatic HSDir selection
             hsdirs = hsdir_ring.get_responsible_hsdirs(blinded_key)
             print(f"Responsible HSDirs ({len(hsdirs)}):")
-            for i, hsdir in enumerate(hsdirs[:3]):  # Show first 3
+            for i, hsdir in enumerate(hsdirs):
                 print(f"  [{i+1}] {hsdir.nickname} ({hsdir.ip}:{hsdir.orport})")
-            if len(hsdirs) > 3:
-                print(f"  ... and {len(hsdirs) - 3} more")
 
         # Fetch descriptor from HSDirs (try first 6)
         for hsdir in hsdirs[:6]:
             print(f"\nFetching descriptor from {hsdir.nickname}...")
-            result = fetch_hs_descriptor(
-                consensus=consensus,
-                hsdir=hsdir,
-                blinded_key=blinded_key,
-                timeout=args.timeout,
-                use_3hop_circuit=not getattr(args, "direct", False),
-                verbose=getattr(args, "debug", False),
-            )
-            if result:
-                descriptor_text, hsdir_used = result
-                print(f"  Descriptor fetched from {hsdir_used.nickname}")
-                break
-            print(f"  Failed to fetch from {hsdir.nickname}")
+            try:
+                result = fetch_hs_descriptor(
+                    consensus=consensus,
+                    hsdir=hsdir,
+                    blinded_key=blinded_key,
+                    timeout=args.timeout,
+                    use_3hop_circuit=not getattr(args, "direct", False),
+                    verbose=getattr(args, "debug", False),
+                )
+                if result:
+                    descriptor_text, hsdir_used = result
+                    print(f"  Descriptor fetched from {hsdir_used.nickname}")
+                    break
+                print(f"  Failed to fetch from {hsdir.nickname}")
+            except (
+                ConnectionError,
+                OSError,
+                TimeoutError,
+                httpx.ConnectError,
+                httpx.TimeoutException,
+                httpx.NetworkError,
+            ) as e:
+                # Connection errors - retry with next HSDir
+                if getattr(args, "debug", False):
+                    print(f"  Connection error: {e}")
+                else:
+                    print(f"  Failed to connect to {hsdir.nickname}, trying next...")
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                # Other errors - log and retry
+                if getattr(args, "debug", False):
+                    traceback.print_exc()
+                else:
+                    print(f"  Failed: {type(e).__name__}, trying next...")
 
         if descriptor_text is None:
             print("\nFailed to fetch descriptor from any HSDir", file=sys.stderr)
             return 1
 
-        # Parse the descriptor
+        # Parse and decrypt the descriptor
         try:
-            descriptor = parse_hs_descriptor(descriptor_text)
+            descriptor = parse_hs_descriptor(descriptor_text, blinded_key, subcredential)
         except ValueError as e:
             print(f"\nFailed to parse descriptor: {e}", file=sys.stderr)
             return 1
@@ -1048,8 +1094,19 @@ def cmd_hidden_service(args: argparse.Namespace) -> int:
         print(f"  Superencrypted: {len(descriptor.outer.superencrypted_blob)} bytes")
         print(f"  Signature: {len(descriptor.outer.signature)} bytes")
 
-        if not descriptor.decrypted:
-            print(f"\n[Descriptor decryption: {descriptor.decryption_error}]")
+        if descriptor.decrypted:
+            print(f"\nIntroduction Points ({len(descriptor.introduction_points)}):")
+            for i, ip in enumerate(descriptor.introduction_points):
+                ip_addr = ip.ip_address or "unknown"
+                port = ip.port or 0
+                fp = ip.fingerprint or "unknown"
+                print(f"  [{i+1}] {ip_addr}:{port} (fp: {fp[:16]}...)")
+                if ip.onion_key_ntor:
+                    print(f"      onion-key: {len(ip.onion_key_ntor)} bytes")
+                if ip.enc_key:
+                    print(f"      enc-key: {len(ip.enc_key)} bytes")
+        else:
+            print(f"\n[Descriptor decryption failed: {descriptor.decryption_error}]")
 
         # TODO: Rendezvous (if --connect)
         if args.connect:

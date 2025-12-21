@@ -20,8 +20,12 @@ Descriptor structure (outer layer):
 from __future__ import annotations
 
 import base64
+import struct
 from dataclasses import dataclass, field
 
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+from torscope.crypto import sha3_256, shake256
 from torscope.directory.models import ConsensusDocument, RouterStatusEntry
 from torscope.onion.circuit import Circuit
 from torscope.onion.connection import RelayConnection
@@ -356,24 +360,401 @@ def fetch_hs_descriptor(
         conn.close()
 
 
-def parse_hs_descriptor(content: str) -> HSDescriptor:
+def parse_hs_descriptor(
+    content: str,
+    blinded_key: bytes | None = None,
+    subcredential: bytes | None = None,
+) -> HSDescriptor:
     """Parse a complete HS descriptor.
 
     Args:
         content: Raw descriptor text
+        blinded_key: 32-byte blinded public key (required for decryption)
+        subcredential: 32-byte subcredential (required for decryption)
 
     Returns:
         Parsed HSDescriptor
-
-    Note:
-        This only parses the outer layer. The introduction points
-        require decryption which is not yet implemented.
     """
     outer = HSDescriptorOuter.parse(content)
+
+    # Try to decrypt if keys are provided
+    if blinded_key is not None and subcredential is not None:
+        try:
+            intro_points = decrypt_descriptor(
+                outer.superencrypted_blob,
+                blinded_key,
+                subcredential,
+                outer.revision_counter,
+            )
+            return HSDescriptor(
+                outer=outer,
+                introduction_points=intro_points,
+                decrypted=True,
+                decryption_error=None,
+            )
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            return HSDescriptor(
+                outer=outer,
+                introduction_points=[],
+                decrypted=False,
+                decryption_error=str(e),
+            )
 
     return HSDescriptor(
         outer=outer,
         introduction_points=[],
         decrypted=False,
-        decryption_error="Decryption not yet implemented",
+        decryption_error="Keys not provided for decryption",
     )
+
+
+# =============================================================================
+# Descriptor Decryption (rend-spec-v3 section 2.5.1-2.5.3)
+# =============================================================================
+
+# Key lengths for AES-256-CTR
+S_KEY_LEN = 32  # AES-256 key
+S_IV_LEN = 16  # AES CTR IV/nonce
+MAC_KEY_LEN = 32  # MAC key
+
+
+def _decrypt_layer(
+    encrypted_blob: bytes,
+    secret_data: bytes,
+    subcredential: bytes,
+    revision_counter: int,
+    string_constant: bytes,
+) -> bytes:
+    """Decrypt one layer of the HS descriptor.
+
+    Args:
+        encrypted_blob: The encrypted data (salt + ciphertext + mac)
+        secret_data: SECRET_DATA for this layer (blinded_key for outer)
+        subcredential: 32-byte subcredential
+        revision_counter: Descriptor revision counter
+        string_constant: String constant for this layer
+
+    Returns:
+        Decrypted plaintext
+
+    Raises:
+        ValueError: If MAC verification fails or data is malformed
+    """
+    # Minimum size: 16 (salt) + 32 (mac) = 48 bytes
+    if len(encrypted_blob) < 48:
+        raise ValueError(f"Encrypted blob too small: {len(encrypted_blob)} bytes")
+
+    # Extract components: SALT (16) | ENCRYPTED | MAC (32)
+    salt = encrypted_blob[:16]
+    mac = encrypted_blob[-32:]
+    ciphertext = encrypted_blob[16:-32]
+
+    # Build secret_input = SECRET_DATA | subcredential | INT_8(revision_counter)
+    secret_input = secret_data + subcredential + struct.pack(">Q", revision_counter)
+
+    # Derive keys using SHAKE-256
+    # keys = SHAKE256(secret_input | salt | STRING_CONSTANT, S_KEY_LEN + S_IV_LEN + MAC_KEY_LEN)
+    kdf_input = secret_input + salt + string_constant
+    keys = shake256(kdf_input, S_KEY_LEN + S_IV_LEN + MAC_KEY_LEN)
+
+    secret_key = keys[:S_KEY_LEN]
+    secret_iv = keys[S_KEY_LEN : S_KEY_LEN + S_IV_LEN]
+    mac_key = keys[S_KEY_LEN + S_IV_LEN :]
+
+    # Verify MAC
+    # D_MAC = SHA3-256(mac_key_len | MAC_KEY | salt_len | SALT | ENCRYPTED)
+    # mac_key_len and salt_len are 8-byte big-endian
+    mac_input = (
+        struct.pack(">Q", len(mac_key)) + mac_key + struct.pack(">Q", len(salt)) + salt + ciphertext
+    )
+    expected_mac = sha3_256(mac_input)
+
+    if mac != expected_mac:
+        raise ValueError("MAC verification failed")
+
+    # Decrypt using AES-256-CTR
+    cipher = Cipher(algorithms.AES(secret_key), modes.CTR(secret_iv))
+    decryptor = cipher.decryptor()
+    plaintext = decryptor.update(ciphertext) + decryptor.finalize()
+
+    return plaintext
+
+
+def decrypt_outer_layer(
+    superencrypted_blob: bytes,
+    blinded_key: bytes,
+    subcredential: bytes,
+    revision_counter: int,
+) -> bytes:
+    """Decrypt the outer (superencrypted) layer.
+
+    Args:
+        superencrypted_blob: The superencrypted blob from the descriptor
+        blinded_key: 32-byte blinded public key
+        subcredential: 32-byte subcredential
+        revision_counter: Descriptor revision counter
+
+    Returns:
+        Decrypted first layer plaintext
+    """
+    return _decrypt_layer(
+        superencrypted_blob,
+        blinded_key,
+        subcredential,
+        revision_counter,
+        b"hsdir-superencrypted-data",
+    )
+
+
+def decrypt_inner_layer(
+    encrypted_blob: bytes,
+    blinded_key: bytes,
+    subcredential: bytes,
+    revision_counter: int,
+    descriptor_cookie: bytes | None = None,
+) -> bytes:
+    """Decrypt the inner (encrypted) layer.
+
+    Args:
+        encrypted_blob: The encrypted blob from the first layer
+        blinded_key: 32-byte blinded public key
+        subcredential: 32-byte subcredential
+        revision_counter: Descriptor revision counter
+        descriptor_cookie: Optional 32-byte client auth cookie
+
+    Returns:
+        Decrypted second layer plaintext (introduction points)
+    """
+    # SECRET_DATA = blinded_key | descriptor_cookie (if client auth enabled)
+    if descriptor_cookie:
+        secret_data = blinded_key + descriptor_cookie
+    else:
+        secret_data = blinded_key
+
+    return _decrypt_layer(
+        encrypted_blob,
+        secret_data,
+        subcredential,
+        revision_counter,
+        b"hsdir-encrypted-data",
+    )
+
+
+def _parse_first_layer(plaintext: bytes) -> bytes:
+    """Parse the first layer plaintext to extract the encrypted blob.
+
+    First layer format:
+        desc-auth-type ...
+        desc-auth-ephemeral-key ...
+        auth-client ...
+        encrypted
+        -----BEGIN MESSAGE-----
+        <base64>
+        -----END MESSAGE-----
+
+    Args:
+        plaintext: Decrypted first layer
+
+    Returns:
+        The encrypted blob for the second layer
+    """
+    text = plaintext.decode("utf-8", errors="replace")
+    lines = text.strip().split("\n")
+
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+
+        if line == "encrypted":
+            # Read the MESSAGE block
+            blob_lines = []
+            i += 1
+            while i < len(lines) and not lines[i].startswith("-----END"):
+                if not lines[i].startswith("-----BEGIN"):
+                    blob_lines.append(lines[i].strip())
+                i += 1
+            return base64.b64decode("".join(blob_lines))
+
+        i += 1
+
+    raise ValueError("No encrypted blob found in first layer")
+
+
+def _parse_introduction_points(plaintext: bytes) -> list[IntroductionPoint]:
+    """Parse introduction points from decrypted second layer.
+
+    Second layer format:
+        create2-formats 2
+        intro-auth-required ed25519
+        single-onion-service  (optional)
+        introduction-point <link-specifiers-base64>
+        onion-key ntor <base64>
+        auth-key
+        -----BEGIN ED25519 CERT-----
+        ...
+        -----END ED25519 CERT-----
+        enc-key ntor <base64>
+        enc-key-cert
+        -----BEGIN ED25519 CERT-----
+        ...
+        -----END ED25519 CERT-----
+
+    Args:
+        plaintext: Decrypted second layer
+
+    Returns:
+        List of IntroductionPoint objects
+    """
+    text = plaintext.decode("utf-8", errors="replace")
+    lines = text.strip().split("\n")
+
+    intro_points: list[IntroductionPoint] = []
+    current_ip: IntroductionPoint | None = None
+
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+
+        if line.startswith("introduction-point "):
+            # Start a new introduction point
+            if current_ip is not None:
+                intro_points.append(current_ip)
+
+            current_ip = IntroductionPoint()
+
+            # Parse link specifiers
+            link_spec_b64 = line.split()[1]
+            # Add padding if needed
+            padding = 4 - len(link_spec_b64) % 4
+            if padding != 4:
+                link_spec_b64 += "=" * padding
+            link_spec_data = base64.b64decode(link_spec_b64)
+            current_ip.link_specifiers = _parse_link_specifiers(link_spec_data)
+
+        elif current_ip is not None:
+            if line.startswith("onion-key ntor "):
+                # Curve25519 key for ntor
+                key_b64 = line.split()[2]
+                padding = 4 - len(key_b64) % 4
+                if padding != 4:
+                    key_b64 += "=" * padding
+                current_ip.onion_key_ntor = base64.b64decode(key_b64)
+
+            elif line.startswith("enc-key ntor "):
+                # X25519 encryption key
+                key_b64 = line.split()[2]
+                padding = 4 - len(key_b64) % 4
+                if padding != 4:
+                    key_b64 += "=" * padding
+                current_ip.enc_key = base64.b64decode(key_b64)
+
+            elif line.startswith("auth-key"):
+                # Read Ed25519 auth key certificate
+                cert_lines = []
+                i += 1
+                while i < len(lines) and not lines[i].startswith("-----END"):
+                    if not lines[i].startswith("-----BEGIN"):
+                        cert_lines.append(lines[i].strip())
+                    i += 1
+                cert_data = base64.b64decode("".join(cert_lines))
+                # Extract the auth key from the cert (key is at offset 39, 32 bytes)
+                if len(cert_data) >= 71:
+                    current_ip.auth_key = cert_data[39:71]
+
+        i += 1
+
+    # Don't forget the last one
+    if current_ip is not None:
+        intro_points.append(current_ip)
+
+    return intro_points
+
+
+def _parse_link_specifiers(data: bytes) -> list[tuple[int, bytes]]:
+    """Parse link specifiers from binary data.
+
+    Format:
+        NSPEC (1 byte) - number of specifiers
+        For each specifier:
+            LSTYPE (1 byte) - type
+            LSLEN (1 byte) - length
+            LSDATA (LSLEN bytes) - data
+
+    Link specifier types:
+        0: TLS-TCP-IPv4 (6 bytes: 4 IP + 2 port)
+        1: TLS-TCP-IPv6 (18 bytes: 16 IP + 2 port)
+        2: Legacy identity (20 bytes: RSA fingerprint)
+        3: Ed25519 identity (32 bytes)
+
+    Args:
+        data: Raw link specifier data
+
+    Returns:
+        List of (type, data) tuples
+    """
+    if len(data) < 1:
+        return []
+
+    nspec = data[0]
+    specifiers: list[tuple[int, bytes]] = []
+    offset = 1
+
+    for _ in range(nspec):
+        if offset + 2 > len(data):
+            break
+
+        lstype = data[offset]
+        lslen = data[offset + 1]
+        offset += 2
+
+        if offset + lslen > len(data):
+            break
+
+        lsdata = data[offset : offset + lslen]
+        specifiers.append((lstype, lsdata))
+        offset += lslen
+
+    return specifiers
+
+
+def decrypt_descriptor(
+    superencrypted_blob: bytes,
+    blinded_key: bytes,
+    subcredential: bytes,
+    revision_counter: int,
+    descriptor_cookie: bytes | None = None,
+) -> list[IntroductionPoint]:
+    """Decrypt a v3 hidden service descriptor and parse introduction points.
+
+    This performs both layers of decryption:
+    1. Outer layer (superencrypted) -> reveals auth data and inner blob
+    2. Inner layer (encrypted) -> reveals introduction points
+
+    Args:
+        superencrypted_blob: The superencrypted blob from the descriptor
+        blinded_key: 32-byte blinded public key
+        subcredential: 32-byte subcredential
+        revision_counter: Descriptor revision counter
+        descriptor_cookie: Optional 32-byte client auth cookie
+
+    Returns:
+        List of IntroductionPoint objects
+
+    Raises:
+        ValueError: If decryption or parsing fails
+    """
+    # Decrypt outer layer
+    first_layer_plaintext = decrypt_outer_layer(
+        superencrypted_blob, blinded_key, subcredential, revision_counter
+    )
+
+    # Parse first layer to get the encrypted blob
+    encrypted_blob = _parse_first_layer(first_layer_plaintext)
+
+    # Decrypt inner layer
+    second_layer_plaintext = decrypt_inner_layer(
+        encrypted_blob, blinded_key, subcredential, revision_counter, descriptor_cookie
+    )
+
+    # Parse introduction points
+    return _parse_introduction_points(second_layer_plaintext)

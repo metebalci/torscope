@@ -29,7 +29,11 @@ pip install torscope
 
 ## Usage
 
+## Example Onion Addresses
 
+- duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion
+- protonmailrmez3lotccipshtkleegetolb73fuirgj7r4o4vfu7ozyd.onion
+- dwnewsgngmhlplxy6o2twtfgjnrnjxbegbwqx6wnotdhkzt562tszfid.onion
 
 ## License
 
