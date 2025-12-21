@@ -49,10 +49,10 @@ class HSDirectoryRing:
         hsdir_index = SHA3-256("node-idx" | ed25519_id | shared_random |
                                INT_8(period_num) | INT_8(period_length))
 
-    Services compute their position similarly:
+    Services compute their position similarly (replica is 1-indexed: 1, 2):
 
         hs_index = SHA3-256("store-at-idx" | blinded_key |
-                            INT_1(replica) | INT_8(period_length) |
+                            INT_8(replica) | INT_8(period_length) |
                             INT_8(period_num))
     """
 
@@ -305,7 +305,7 @@ class HSDirectoryRing:
         responsible: list[RouterStatusEntry] = []
         seen_fingerprints: set[str] = set()
 
-        for replica in range(n_replicas):
+        for replica in range(1, n_replicas + 1):  # 1-indexed per spec
             # Compute service's position for this replica
             hs_index = self._compute_hs_index(blinded_key, replica)
 
