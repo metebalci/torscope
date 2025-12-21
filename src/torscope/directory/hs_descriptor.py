@@ -213,8 +213,7 @@ def fetch_hs_descriptor(
         Tuple of (descriptor_text, hsdir_used) or None if fetch fails
     """
     # pylint: disable=import-outside-toplevel
-    from torscope.cache import get_ntor_key_from_cache
-    from torscope.directory.or_client import fetch_ntor_key
+    from torscope.microdesc import get_ntor_key
 
     # pylint: enable=import-outside-toplevel
 
@@ -251,21 +250,14 @@ def fetch_hs_descriptor(
     # Get ntor keys for all routers in the path
     ntor_keys: list[bytes] = []
     for router in routers:
-        # Try cache first (using microdesc_hash, not fingerprint)
-        if router.microdesc_hash:
-            cached_result = get_ntor_key_from_cache(router.microdesc_hash)
-            if cached_result:
-                ntor_keys.append(cached_result[0])  # Extract just the key bytes
-                _log(f"Got ntor key from cache for {router.nickname}")
-                continue
-
-        # Fetch via HTTP using fingerprint
-        _log(f"Fetching ntor key for {router.nickname}...")
-        result = fetch_ntor_key(router.fingerprint, int(timeout))
+        _log(f"Getting ntor key for {router.nickname}...")
+        result = get_ntor_key(router, consensus)
         if result is None:
-            _log(f"Failed to fetch ntor key for {router.nickname}")
+            _log(f"Failed to get ntor key for {router.nickname}")
             return None
-        ntor_keys.append(result[0])
+        ntor_key, source_name, source_type, from_cache = result
+        _log(f"Got ntor key from {source_name} ({'cached' if from_cache else source_type})")
+        ntor_keys.append(ntor_key)
 
     # Connect and build circuit
     first_router = routers[0]

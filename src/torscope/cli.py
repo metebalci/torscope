@@ -5,7 +5,6 @@ Provides command-line tools for exploring the Tor network.
 """
 
 import argparse
-import random
 import sys
 import traceback
 from collections.abc import Callable
@@ -14,11 +13,10 @@ import httpx
 
 from torscope import __version__
 from torscope.cache import (
+    cleanup_stale_microdescriptors,
     clear_cache,
-    get_ntor_key_from_cache,
     load_consensus,
     save_consensus,
-    save_microdescriptors,
 )
 from torscope.directory.authority import get_authorities
 from torscope.directory.certificates import KeyCertificateParser
@@ -29,9 +27,8 @@ from torscope.directory.extra_info import ExtraInfoParser
 from torscope.directory.fallback import get_fallbacks
 from torscope.directory.hs_descriptor import fetch_hs_descriptor, parse_hs_descriptor
 from torscope.directory.hsdir import HSDirectoryRing
-from torscope.directory.microdescriptor import MicrodescriptorParser
 from torscope.directory.models import ConsensusDocument, RouterStatusEntry
-from torscope.directory.or_client import fetch_ntor_key
+from torscope.microdesc import get_ntor_key
 from torscope.onion.address import OnionAddress, get_current_time_period, get_time_period_info
 from torscope.onion.circuit import Circuit
 from torscope.onion.connection import RelayConnection
@@ -120,6 +117,11 @@ def get_consensus(no_cache: bool = False) -> ConsensusDocument:
 
     # Save consensus to cache
     save_consensus(content, used_authority.nickname, "authority")
+
+    # Clean up stale microdescriptors not in the new consensus
+    removed = cleanup_stale_microdescriptors(consensus)
+    if removed > 0:
+        print(f"Cleaned up {removed} stale microdescriptor(s) from cache", file=sys.stderr)
 
     return consensus
 
@@ -498,104 +500,6 @@ def _find_router(consensus: ConsensusDocument, query: str) -> RouterStatusEntry 
     return None
 
 
-def _select_v2dir_router(
-    consensus: ConsensusDocument, exclude: list[str] | None = None
-) -> RouterStatusEntry | None:
-    """Select a random V2Dir router with a DirPort for fetching directory documents."""
-    exclude_set = set(exclude) if exclude else set()
-    candidates = [
-        r
-        for r in consensus.routers
-        if r.has_flag("V2Dir")
-        and r.has_flag("Fast")
-        and r.has_flag("Stable")
-        and r.dirport > 0  # Must have a DirPort
-        and r.fingerprint not in exclude_set
-    ]
-    if not candidates:
-        return None
-    return random.choice(candidates)
-
-
-def _fetch_microdesc_from_router(
-    router: RouterStatusEntry, hashes: list[str]
-) -> tuple[bytes, RouterStatusEntry] | None:
-    """Fetch microdescriptors from a V2Dir router's DirPort."""
-    # Build URL for the router's DirPort
-    hash_string = "-".join(h.rstrip("=") for h in hashes)
-    url = f"http://{router.ip}:{router.dirport}/tor/micro/d/{hash_string}"
-
-    headers = {
-        "Accept-Encoding": "deflate, gzip",
-        "User-Agent": "torscope/0.1.0",
-    }
-
-    try:
-        with httpx.Client(timeout=10.0) as client:
-            response = client.get(url, headers=headers, follow_redirects=True)
-            response.raise_for_status()
-            return response.content, router
-    except httpx.HTTPError:
-        return None
-
-
-def _get_ntor_key(
-    router: RouterStatusEntry, consensus: ConsensusDocument
-) -> tuple[bytes, str, str, bool] | None:
-    """
-    Get ntor-onion-key for a router, using cache or fetching on-demand.
-
-    Args:
-        router: Router status entry with fingerprint and microdesc_hash
-        consensus: Network consensus for finding V2Dir routers
-
-    Returns:
-        Tuple of (32-byte ntor key, source_name, source_type, from_cache) or None
-        source_type is "dircache", "authority", or "descriptor"
-        from_cache indicates if this was retrieved from local cache
-    """
-    # Try cached microdescriptor first
-    if router.microdesc_hash:
-        cache_result = get_ntor_key_from_cache(router.microdesc_hash)
-        if cache_result is not None:
-            ntor_key, source_name, source_type = cache_result
-            return ntor_key, source_name, source_type, True
-
-        # Try fetching from a V2Dir router (directory cache)
-        v2dir_router = _select_v2dir_router(consensus, exclude=[router.fingerprint])
-        if v2dir_router:
-            result = _fetch_microdesc_from_router(v2dir_router, [router.microdesc_hash])
-            if result:
-                md_content, used_router = result
-                microdescriptors = MicrodescriptorParser.parse(md_content)
-                if microdescriptors:
-                    save_microdescriptors(microdescriptors, used_router.nickname, "dircache")
-                    cache_result = get_ntor_key_from_cache(router.microdesc_hash)
-                    if cache_result is not None:
-                        return cache_result[0], used_router.nickname, "dircache", False
-
-        # Fall back to authority
-        try:
-            client = DirectoryClient()
-            md_content, authority = client.fetch_microdescriptors([router.microdesc_hash])
-            microdescriptors = MicrodescriptorParser.parse(md_content)
-            if microdescriptors:
-                save_microdescriptors(microdescriptors, authority.nickname, "authority")
-                cache_result = get_ntor_key_from_cache(router.microdesc_hash)
-                if cache_result is not None:
-                    return cache_result[0], authority.nickname, "authority", False
-        # pylint: disable-next=broad-exception-caught
-        except Exception:
-            pass  # Fall through to server descriptor
-
-    # Fall back to fetching server descriptor
-    desc_result = fetch_ntor_key(router.fingerprint)
-    if desc_result is not None:
-        ntor_key, source_name = desc_result
-        return ntor_key, source_name, "descriptor", False
-    return None
-
-
 def cmd_circuit(args: argparse.Namespace) -> int:  # pylint: disable=too-many-return-statements
     """Build a circuit (1-3 hops), optionally open a stream and send data."""
     try:
@@ -655,7 +559,7 @@ def cmd_circuit(args: argparse.Namespace) -> int:  # pylint: disable=too-many-re
         # Fetch descriptors for all routers
         ntor_keys = []
         for router in routers:
-            result = _get_ntor_key(router, consensus)
+            result = get_ntor_key(router, consensus)
             if result is None:
                 print(f"No ntor-onion-key for {router.nickname}", file=sys.stderr)
                 return 1
@@ -819,7 +723,7 @@ def cmd_resolve(args: argparse.Namespace) -> int:
         # Fetch ntor keys for all routers
         ntor_keys = []
         for router in routers:
-            result = _get_ntor_key(router, consensus)
+            result = get_ntor_key(router, consensus)
             if result is None:
                 print(f"No ntor-onion-key for {router.nickname}", file=sys.stderr)
                 return 1
@@ -828,8 +732,13 @@ def cmd_resolve(args: argparse.Namespace) -> int:
 
             # Report source
             action = "Using" if from_cache else "Fetched"
-            type_label = "cache" if source_type == "dircache" else source_type
-            msg = f"{action} {router.nickname}'s microdescriptor from {source_name} ({type_label})"
+            if source_name and source_type:
+                type_label = "cache" if source_type == "dircache" else source_type
+                msg = f"{action} {router.nickname}'s microdescriptor "
+                msg += f"from {source_name} ({type_label})"
+            else:
+                # Old cache entries may lack source info
+                msg = f"{action} {router.nickname}'s microdescriptor from cache"
             print(msg, file=sys.stderr)
 
         print("\nBuilding 3-hop circuit for DNS resolution:")

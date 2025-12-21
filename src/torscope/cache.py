@@ -15,16 +15,54 @@ from torscope.directory.models import ConsensusDocument, Microdescriptor
 CACHE_DIR = Path(".torscope")
 CONSENSUS_FILE = CACHE_DIR / "consensus.bin"
 CONSENSUS_META = CACHE_DIR / "consensus.json"
-MICRODESC_FILE = CACHE_DIR / "microdescriptors.json"
+MICRODESC_DIR = CACHE_DIR / "microdesc"
 
 # In-memory cache for microdescriptors (avoid repeated disk reads)
-_microdesc_cache: dict[str, dict[str, str | None]] | None = None
-_microdesc_cache_mtime: float = 0.0
+_microdesc_cache: dict[str, dict[str, str | None]] = {}
 
 
 def _ensure_cache_dir() -> None:
     """Create cache directory if it doesn't exist."""
     CACHE_DIR.mkdir(exist_ok=True)
+
+
+def _ensure_microdesc_dir() -> None:
+    """Create microdescriptor cache directory if it doesn't exist."""
+    _ensure_cache_dir()
+    MICRODESC_DIR.mkdir(exist_ok=True)
+
+
+def _digest_to_filename(digest: str) -> str:
+    """Convert base64 digest to filesystem-safe hex filename."""
+    # Decode base64 to bytes, then encode as hex (always unique and safe)
+    normalized = _normalize_digest(digest)
+    try:
+        raw_bytes = base64.b64decode(normalized)
+        return f"{raw_bytes.hex()}.json"
+    except ValueError:
+        # Fallback: use the digest directly with unsafe chars replaced
+        safe = digest.rstrip("=").replace("/", "_").replace("+", "-")
+        return f"{safe}.json"
+
+
+def _filename_to_digest(filename: str) -> str:
+    """Convert hex filename back to base64 digest."""
+    hex_str = filename.removesuffix(".json")
+    try:
+        raw_bytes = bytes.fromhex(hex_str)
+        return base64.b64encode(raw_bytes).decode("ascii")
+    except ValueError:
+        # Fallback: assume old format with replaced chars
+        base = hex_str.replace("_", "/").replace("-", "+")
+        padding = (4 - len(base) % 4) % 4
+        return base + "=" * padding
+
+
+def _normalize_digest(digest: str) -> str:
+    """Normalize digest to padded base64."""
+    stripped = digest.rstrip("=")
+    padding = (4 - len(stripped) % 4) % 4
+    return stripped + "=" * padding
 
 
 def save_consensus(content: bytes, source: str, source_type: str = "authority") -> None:
@@ -110,12 +148,21 @@ def get_cache_info() -> dict[str, str] | None:
 
 def clear_cache() -> None:
     """Remove all cached files."""
+    global _microdesc_cache  # noqa: PLW0603
+
     if CONSENSUS_FILE.exists():
         CONSENSUS_FILE.unlink()
     if CONSENSUS_META.exists():
         CONSENSUS_META.unlink()
-    if MICRODESC_FILE.exists():
-        MICRODESC_FILE.unlink()
+
+    # Clear microdescriptor cache directory
+    if MICRODESC_DIR.exists():
+        for f in MICRODESC_DIR.iterdir():
+            if f.is_file() and f.suffix == ".json":
+                f.unlink()
+
+    # Clear in-memory cache
+    _microdesc_cache = {}
 
 
 def save_microdescriptors(
@@ -124,21 +171,18 @@ def save_microdescriptors(
     source_type: str = "",
 ) -> None:
     """
-    Save microdescriptors to cache.
+    Save microdescriptors to cache as individual files.
 
     Args:
         microdescriptors: List of parsed Microdescriptor objects
         source_name: Name of the source relay/authority
         source_type: Type of source ("authority", "dircache", etc.)
     """
-    _ensure_cache_dir()
+    _ensure_microdesc_dir()
 
-    # Load existing cache and merge
-    existing = _load_microdesc_cache()
-
-    # Add new microdescriptors (overwrite if exists)
     for md in microdescriptors:
-        existing[md.digest] = {
+        digest = _normalize_digest(md.digest)
+        entry = {
             "raw": md.raw_descriptor,
             "ntor_key": md.onion_key_ntor,
             "ed25519_identity": md.ed25519_identity,
@@ -147,36 +191,33 @@ def save_microdescriptors(
             "fetched_at": datetime.now(UTC).isoformat(),
         }
 
-    # Save merged cache and invalidate in-memory cache
-    global _microdesc_cache, _microdesc_cache_mtime  # noqa: PLW0603
-    MICRODESC_FILE.write_text(json.dumps(existing))
-    _microdesc_cache = existing  # Update in-memory cache directly
-    _microdesc_cache_mtime = MICRODESC_FILE.stat().st_mtime
+        # Save to individual file
+        filepath = MICRODESC_DIR / _digest_to_filename(digest)
+        filepath.write_text(json.dumps(entry))
+
+        # Update in-memory cache
+        _microdesc_cache[digest] = entry
 
 
-def _load_microdesc_cache() -> dict[str, dict[str, str | None]]:
-    """Load microdescriptor cache file with in-memory caching."""
-    global _microdesc_cache, _microdesc_cache_mtime  # noqa: PLW0603
+def _load_microdesc_entry(digest: str) -> dict[str, str | None] | None:
+    """Load a single microdescriptor from cache."""
+    digest = _normalize_digest(digest)
 
-    if not MICRODESC_FILE.exists():
-        _microdesc_cache = {}
-        return _microdesc_cache
+    # Check in-memory cache first
+    if digest in _microdesc_cache:
+        return _microdesc_cache[digest]
+
+    # Try loading from file
+    filepath = MICRODESC_DIR / _digest_to_filename(digest)
+    if not filepath.exists():
+        return None
 
     try:
-        # Check if file has been modified since last read
-        current_mtime = MICRODESC_FILE.stat().st_mtime
-        if _microdesc_cache is not None and current_mtime == _microdesc_cache_mtime:
-            return _microdesc_cache
-
-        # Reload from disk
-        result: dict[str, dict[str, str | None]] = json.loads(MICRODESC_FILE.read_text())
-        _microdesc_cache = result
-        _microdesc_cache_mtime = current_mtime
-        return result
-    # pylint: disable-next=broad-exception-caught
-    except Exception:
-        _microdesc_cache = {}
-        return _microdesc_cache
+        entry: dict[str, str | None] = json.loads(filepath.read_text())
+        _microdesc_cache[digest] = entry
+        return entry
+    except (json.JSONDecodeError, OSError):
+        return None
 
 
 def get_microdescriptor(digest: str) -> Microdescriptor | None:
@@ -189,19 +230,15 @@ def get_microdescriptor(digest: str) -> Microdescriptor | None:
     Returns:
         Microdescriptor if cached, None otherwise
     """
-    cache = _load_microdesc_cache()
-
-    # Try both with and without trailing '='
-    digest_stripped = digest.rstrip("=")
-    digest_padded = digest_stripped + "=" * ((4 - len(digest_stripped) % 4) % 4)
-
-    entry = cache.get(digest_padded) or cache.get(digest_stripped)
+    entry = _load_microdesc_entry(digest)
     if entry is None:
         return None
 
+    digest_normalized = _normalize_digest(digest)
+
     # Reconstruct Microdescriptor from cached data
     return Microdescriptor(
-        digest=digest_padded,
+        digest=digest_normalized,
         onion_key_ntor=entry.get("ntor_key"),
         ed25519_identity=entry.get("ed25519_identity"),
         raw_descriptor=entry.get("raw") or "",
@@ -218,13 +255,7 @@ def get_ntor_key_from_cache(digest: str) -> tuple[bytes, str, str] | None:
     Returns:
         Tuple of (32-byte ntor-onion-key, source_name, source_type) or None if not cached
     """
-    cache = _load_microdesc_cache()
-
-    # Try both with and without trailing '='
-    digest_stripped = digest.rstrip("=")
-    digest_padded = digest_stripped + "=" * ((4 - len(digest_stripped) % 4) % 4)
-
-    entry = cache.get(digest_padded) or cache.get(digest_stripped)
+    entry = _load_microdesc_entry(digest)
     if entry is None:
         return None
 
@@ -258,13 +289,7 @@ def get_ed25519_from_cache(digest: str) -> bytes | None:
     Returns:
         32-byte Ed25519 identity or None if not cached
     """
-    cache = _load_microdesc_cache()
-
-    # Try both with and without trailing '='
-    digest_stripped = digest.rstrip("=")
-    digest_padded = digest_stripped + "=" * ((4 - len(digest_stripped) % 4) % 4)
-
-    entry = cache.get(digest_padded) or cache.get(digest_stripped)
+    entry = _load_microdesc_entry(digest)
     if entry is None:
         return None
 
@@ -285,4 +310,45 @@ def get_ed25519_from_cache(digest: str) -> bytes | None:
 
 def get_cached_microdesc_count() -> int:
     """Get number of cached microdescriptors."""
-    return len(_load_microdesc_cache())
+    if not MICRODESC_DIR.exists():
+        return 0
+    return sum(1 for f in MICRODESC_DIR.iterdir() if f.suffix == ".json")
+
+
+def cleanup_stale_microdescriptors(consensus: ConsensusDocument) -> int:
+    """
+    Remove cached microdescriptors not present in the current consensus.
+
+    Args:
+        consensus: Current network consensus
+
+    Returns:
+        Number of files removed
+    """
+    if not MICRODESC_DIR.exists():
+        return 0
+
+    # Build set of valid digests from consensus
+    valid_digests = {
+        _normalize_digest(r.microdesc_hash) for r in consensus.routers if r.microdesc_hash
+    }
+
+    removed = 0
+
+    for filepath in MICRODESC_DIR.iterdir():
+        if filepath.suffix != ".json":
+            continue
+
+        try:
+            digest = _filename_to_digest(filepath.name)
+            if digest not in valid_digests:
+                # Remove from in-memory cache
+                _microdesc_cache.pop(digest, None)
+
+                # Remove file
+                filepath.unlink()
+                removed += 1
+        except OSError:
+            continue
+
+    return removed

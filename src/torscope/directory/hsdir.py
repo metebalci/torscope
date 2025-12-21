@@ -208,7 +208,7 @@ class HSDirectoryRing:
                         microdescriptors = MicrodescriptorParser.parse(content.decode("utf-8"))
 
                         # Save to cache and extract identities
-                        save_microdescriptors(microdescriptors)
+                        save_microdescriptors(microdescriptors, authority.nickname, "authority")
 
                         for md in microdescriptors:
                             if md.ed25519_identity:

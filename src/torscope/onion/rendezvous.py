@@ -19,10 +19,10 @@ import base64
 import time
 from dataclasses import dataclass
 
-from torscope.cache import get_ed25519_from_cache, get_ntor_key_from_cache
+from torscope.cache import get_ed25519_from_cache
 from torscope.directory.hs_descriptor import IntroductionPoint
 from torscope.directory.models import ConsensusDocument, RouterStatusEntry
-from torscope.directory.or_client import fetch_ntor_key
+from torscope.microdesc import get_ntor_key
 from torscope.onion.address import OnionAddress
 from torscope.onion.circuit import Circuit
 from torscope.onion.connection import RelayConnection
@@ -98,12 +98,12 @@ def select_rendezvous_point(consensus: ConsensusDocument) -> RouterStatusEntry:
     return candidates[-1]  # Fallback
 
 
-def get_router_ntor_key(router: RouterStatusEntry, timeout: int = 30) -> bytes:
+def get_router_ntor_key(router: RouterStatusEntry, _timeout: int = 30) -> bytes:
     """Get ntor key for a router, from cache or by fetching.
 
     Args:
         router: Router to get key for
-        timeout: Fetch timeout in seconds
+        _timeout: Unused, kept for API compatibility
 
     Returns:
         32-byte ntor-onion-key
@@ -111,17 +111,9 @@ def get_router_ntor_key(router: RouterStatusEntry, timeout: int = 30) -> bytes:
     Raises:
         RendezvousError: If key cannot be obtained
     """
-    # Try cache first
-    if router.microdesc_hash:
-        cached = get_ntor_key_from_cache(router.microdesc_hash)
-        if cached:
-            return cached[0]
-
-    # Fetch via HTTP
-    result = fetch_ntor_key(router.fingerprint, timeout)
+    result = get_ntor_key(router)
     if result is None:
         raise RendezvousError(f"Failed to get ntor key for {router.nickname}")
-
     return result[0]
 
 
