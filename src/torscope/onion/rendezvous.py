@@ -16,6 +16,7 @@ See: https://spec.torproject.org/rend-spec/rendezvous-protocol.html
 from __future__ import annotations
 
 import base64
+import sys
 import time
 from dataclasses import dataclass
 
@@ -142,7 +143,7 @@ def build_circuit_to_router(
 
     def _log(msg: str) -> None:
         if verbose:
-            print(f"  [rendezvous] {msg}")
+            print(f"  [rendezvous] {msg}", file=sys.stderr)
 
     # Select path with target as exit
     selector = PathSelector(consensus)
@@ -218,7 +219,7 @@ def establish_rendezvous(
 
     def _log(msg: str) -> None:
         if verbose:
-            print(f"  [rendezvous] {msg}")
+            print(f"  [rendezvous] {msg}", file=sys.stderr)
 
     # Generate random cookie
     cookie = generate_rendezvous_cookie()
@@ -275,7 +276,7 @@ def send_introduce(
 
     def _log(msg: str) -> None:
         if verbose:
-            print(f"  [rendezvous] {msg}")
+            print(f"  [rendezvous] {msg}", file=sys.stderr)
 
     # Get auth_key and enc_key from intro point
     if intro_point.auth_key is None:
@@ -304,6 +305,18 @@ def send_introduce(
     if ed_key:
         rp_specs.append(LinkSpecifier.from_ed25519_id(ed_key))
 
+    # Log RP link specifiers
+    _log(f"RP link specifiers: {len(rp_specs)} specs")
+    for s in rp_specs:
+        if s.spec_type == 0:  # IPv4
+            ip_str = ".".join(str(b) for b in s.data[:4])
+            port = (s.data[4] << 8) | s.data[5]
+            _log(f"  IPv4: {ip_str}:{port}")
+        elif s.spec_type == 2:  # Legacy ID
+            _log(f"  Legacy ID: {s.data.hex()}")
+        elif s.spec_type == 3:  # Ed25519 ID
+            _log(f"  Ed25519 ID: {s.data.hex()[:32]}...")
+
     # Create encrypted payload
     encrypted_plaintext = create_introduce1_encrypted_payload(
         rendezvous_cookie=rendezvous_cookie,
@@ -323,6 +336,10 @@ def send_introduce(
     )
 
     _log(f"Sending INTRODUCE1 ({len(introduce1_data)} bytes)")
+    _log(f"  intro auth_key: {intro_point.auth_key.hex()[:32]}...")
+    _log(f"  intro enc_key: {intro_point.enc_key.hex()[:32]}...")
+    _log(f"  client_pk: {hs_ntor.client_pubkey.hex()[:32]}...")
+    _log(f"  subcredential: {subcredential.hex()[:32]}...")
 
     # Send INTRODUCE1
     introduce1_cell = RelayCell(
@@ -374,7 +391,7 @@ def complete_rendezvous(
 
     def _log(msg: str) -> None:
         if verbose:
-            print(f"  [rendezvous] {msg}")
+            print(f"  [rendezvous] {msg}", file=sys.stderr)
 
     _log("Waiting for RENDEZVOUS2...")
 
@@ -455,7 +472,7 @@ def rendezvous_connect(
 
     def _log(msg: str) -> None:
         if verbose:
-            print(f"[rendezvous] {msg}")
+            print(f"[rendezvous] {msg}", file=sys.stderr)
 
     _log(f"Connecting to {onion_address.address[:16]}...")
 

@@ -12,7 +12,7 @@ from collections.abc import Callable
 
 import httpx
 
-from torscope import __version__
+from torscope import __version__, output
 from torscope.cache import (
     cleanup_stale_microdescriptors,
     clear_cache,
@@ -92,8 +92,11 @@ def get_consensus(no_cache: bool = False) -> ConsensusDocument:
     Raises:
         Exception: If fetch fails
     """
+    output.explain("Loading network consensus (list of all Tor relays)")
+
     # Try cache first (unless disabled)
     if not no_cache:
+        output.verbose("Checking local cache for consensus")
         cached = load_consensus()
         if cached is not None:
             consensus, meta = cached
@@ -104,8 +107,10 @@ def get_consensus(no_cache: bool = False) -> ConsensusDocument:
             print(msg, file=sys.stderr)
 
             # Always verify signatures
+            output.explain("Verifying consensus signatures from directory authorities")
             verified, total = verify_consensus_signatures(consensus)
             print(f"Verified {verified}/{total} consensus signatures", file=sys.stderr)
+            output.verbose(f"Signature verification: {verified}/{total} valid")
 
             return consensus
 
@@ -119,9 +124,12 @@ def get_consensus(no_cache: bool = False) -> ConsensusDocument:
             )
 
     # Fetch from network
+    output.explain("Fetching consensus from directory authority")
     client = DirectoryClient()
     content, used_authority = client.fetch_consensus(None, "microdesc")
+    output.verbose(f"Fetched consensus from {used_authority.nickname}")
     consensus = ConsensusParser.parse(content, used_authority.nickname)
+    output.debug(f"Consensus size: {len(content)} bytes, {consensus.total_routers} routers")
     msg = f"Fetched network consensus ({consensus.total_routers:,} routers) "
     msg += f"from {used_authority.nickname} (authority)"
     print(msg, file=sys.stderr)
@@ -156,8 +164,11 @@ def cmd_clear(args: argparse.Namespace) -> int:  # pylint: disable=unused-argume
 
 def cmd_authorities(args: argparse.Namespace) -> int:  # pylint: disable=unused-argument
     """List all directory authorities."""
+    output.explain("Loading hardcoded list of Tor directory authorities")
+    authorities = get_authorities()
+    output.verbose(f"Found {len(authorities)} directory authorities")
     print("Directory Authorities:\n")
-    for i, auth in enumerate(get_authorities(), 1):
+    for i, auth in enumerate(authorities, 1):
         print(f"  [{i}] {auth.nickname}")
         print(f"      Address: {auth.address}")
         print(f"      Identity: {auth.v3ident}")
@@ -169,7 +180,9 @@ def cmd_authorities(args: argparse.Namespace) -> int:  # pylint: disable=unused-
 
 def cmd_fallbacks(args: argparse.Namespace) -> int:  # pylint: disable=unused-argument
     """List fallback directories."""
+    output.explain("Loading hardcoded list of fallback directory relays")
     fallbacks = get_fallbacks()
+    output.verbose(f"Found {len(fallbacks)} fallback directories")
     print(f"Fallback Directories ({len(fallbacks)} total):\n")
     for i, fb in enumerate(fallbacks, 1):
         name = fb.nickname or "unnamed"
@@ -185,10 +198,12 @@ def cmd_fallbacks(args: argparse.Namespace) -> int:  # pylint: disable=unused-ar
 def cmd_routers(args: argparse.Namespace) -> int:
     """List routers from network consensus."""
     try:
+        output.explain("Listing routers from network consensus")
         consensus = get_consensus()
 
         # List available flags if requested
         if args.list_flags:
+            output.verbose("Collecting all router flags")
             all_flags: set[str] = set()
             for router in consensus.routers:
                 all_flags.update(router.flags)
@@ -202,7 +217,9 @@ def cmd_routers(args: argparse.Namespace) -> int:
         routers = consensus.routers
         if args.flags:
             filter_flags = [f.strip() for f in args.flags.split(",")]
+            output.verbose(f"Filtering routers by flags: {filter_flags}")
             routers = [r for r in routers if all(r.has_flag(flag) for flag in filter_flags)]
+            output.verbose(f"Found {len(routers)} routers matching flags")
 
         # Display header
         print(f"\nRouters ({len(routers):,} total):\n")
@@ -229,10 +246,12 @@ def cmd_routers(args: argparse.Namespace) -> int:
 def cmd_router(args: argparse.Namespace) -> int:
     """Show details for a specific router."""
     try:
+        output.explain("Looking up router details from consensus")
         consensus = get_consensus()
 
         # Find router by fingerprint or nickname
         query = args.query.upper()
+        output.verbose(f"Searching for router: {args.query}")
         router = None
 
         for r in consensus.routers:
@@ -248,6 +267,8 @@ def cmd_router(args: argparse.Namespace) -> int:
         if router is None:
             print(f"Router not found: {args.query}", file=sys.stderr)
             return 1
+
+        output.verbose(f"Found router: {router.nickname} ({router.fingerprint[:8]}...)")
 
         # Display consensus info
         print(f"\nRouter: {router.nickname}")
@@ -268,9 +289,12 @@ def cmd_router(args: argparse.Namespace) -> int:
             print(f"  Bandwidth:    {bw_mbps:.2f} MB/s")
 
         # Fetch full descriptor for additional details
+        output.explain("Fetching full server descriptor from directory")
         client = DirectoryClient()
         print("\nFetching full descriptor...", file=sys.stderr)
-        content, _ = client.fetch_server_descriptors([router.fingerprint])
+        content, source = client.fetch_server_descriptors([router.fingerprint])
+        output.verbose(f"Fetched descriptor from {source.nickname}")
+        output.debug(f"Descriptor size: {len(content)} bytes")
         descriptors = ServerDescriptorParser.parse(content)
 
         if descriptors:
@@ -330,10 +354,12 @@ def cmd_router(args: argparse.Namespace) -> int:
 def cmd_extra_info(args: argparse.Namespace) -> int:
     """Show extra-info statistics for a router."""
     try:
+        output.explain("Looking up extra-info descriptor for router")
         consensus = get_consensus()
 
         # Find router by fingerprint or nickname
         query = args.query.upper()
+        output.verbose(f"Searching for router: {args.query}")
         router = None
 
         for r in consensus.routers:
@@ -348,10 +374,15 @@ def cmd_extra_info(args: argparse.Namespace) -> int:
             print(f"Router not found: {args.query}", file=sys.stderr)
             return 1
 
+        output.verbose(f"Found router: {router.nickname}")
+
         # Fetch extra-info
+        output.explain("Fetching extra-info descriptor from directory")
         client = DirectoryClient()
         print(f"Fetching extra-info for {router.nickname}...", file=sys.stderr)
-        extra_content, _ = client.fetch_extra_info([router.fingerprint])
+        extra_content, source = client.fetch_extra_info([router.fingerprint])
+        output.verbose(f"Fetched extra-info from {source.nickname}")
+        output.debug(f"Extra-info size: {len(extra_content)} bytes")
         extra_infos = ExtraInfoParser.parse(extra_content)
 
         if not extra_infos:
@@ -437,12 +468,15 @@ def cmd_extra_info(args: argparse.Namespace) -> int:
 def cmd_path(args: argparse.Namespace) -> int:
     """Select a path through the Tor network using bandwidth-weighted selection."""
     try:
+        output.explain("Selecting a path through the Tor network")
         consensus = get_consensus()
 
         num_hops = args.hops
         target_port = args.port
+        output.verbose(f"Path parameters: {num_hops} hops, target port: {target_port or 'any'}")
 
         # Create path selector
+        output.explain("Creating path selector with bandwidth weighting")
         selector = PathSelector(consensus=consensus)
 
         # Resolve pre-selected routers if specified
@@ -510,7 +544,7 @@ def cmd_path(args: argparse.Namespace) -> int:
     # pylint: disable-next=broad-exception-caught
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
-        if args.debug if hasattr(args, "debug") else False:
+        if output.is_debug():
             traceback.print_exc()
         return 1
 
@@ -572,9 +606,11 @@ def _parse_address_port(addr_port: str) -> tuple[str, int]:
 def cmd_circuit(args: argparse.Namespace) -> int:
     """Build a Tor circuit (1-3 hops)."""
     try:
+        output.explain("Building a Tor circuit through multiple relays")
         consensus = get_consensus()
 
         num_hops = args.hops
+        output.verbose(f"Circuit will have {num_hops} hop(s)")
 
         # Resolve pre-specified routers
         exit_spec = vars(args).get("exit")  # 'exit' is a builtin name
@@ -601,6 +637,7 @@ def cmd_circuit(args: argparse.Namespace) -> int:
                 return 1
 
         # Use PathSelector for bandwidth-weighted selection with exclusions
+        output.explain("Selecting path through the network (bandwidth-weighted)")
         selector = PathSelector(consensus=consensus)
         try:
             path = selector.select_path(
@@ -616,6 +653,7 @@ def cmd_circuit(args: argparse.Namespace) -> int:
 
         routers = path.routers
         roles = path.roles
+        output.verbose(f"Selected path: {' → '.join(r.nickname for r in routers)}")
 
         # Fetch ntor keys for all routers
         ntor_keys = []
@@ -645,6 +683,7 @@ def cmd_circuit(args: argparse.Namespace) -> int:
 
         # Connect to first router
         first_router = routers[0]
+        output.explain("Establishing TLS connection to guard relay")
         print(f"\nConnecting to {first_router.nickname}...")
         conn = RelayConnection(
             host=first_router.ip, port=first_router.orport, timeout=get_timeout()
@@ -653,33 +692,45 @@ def cmd_circuit(args: argparse.Namespace) -> int:
         try:
             conn.connect()
             print("  TLS connection established")
+            output.verbose(f"TLS connected to {first_router.ip}:{first_router.orport}")
 
+            output.explain("Performing link protocol handshake")
             if not conn.handshake():
                 print("  Link handshake failed", file=sys.stderr)
                 return 1
             print(f"  Link protocol: v{conn.link_protocol}")
+            output.verbose(f"Link protocol version: {conn.link_protocol}")
 
             # Create circuit and extend through all hops
             circuit = Circuit.create(conn)
             print(f"  Circuit ID: {circuit.circ_id:#010x}")
+            output.debug(f"Circuit ID: {circuit.circ_id:#010x}")
 
             for i, (router, ntor_key) in enumerate(zip(routers, ntor_keys, strict=True)):
                 if i == 0:
                     # First hop - use CREATE2
+                    output.explain("Performing ntor handshake with guard relay")
                     print(f"\n  Hop {i+1}: Creating circuit to {router.nickname}...")
+                    output.verbose(f"CREATE2 → {router.nickname}")
+                    output.debug(f"ntor-onion-key: {ntor_key.hex()}")
                     if not circuit.extend_to(router.fingerprint, ntor_key):
                         print("    CREATE2 failed", file=sys.stderr)
                         return 1
                     print("    CREATE2/CREATED2 successful")
+                    output.verbose(f"CREATED2 ← {router.nickname}")
                 else:
                     # Subsequent hops - use RELAY_EXTEND2
+                    output.explain(f"Extending circuit to {'middle' if i == 1 else 'exit'} relay")
                     print(f"\n  Hop {i+1}: Extending to {router.nickname}...")
+                    output.verbose(f"RELAY_EXTEND2 → {router.nickname}")
+                    output.debug(f"ntor-onion-key: {ntor_key.hex()}")
                     if not circuit.extend_to(
                         router.fingerprint, ntor_key, ip=router.ip, port=router.orport
                     ):
                         print("    EXTEND2 failed", file=sys.stderr)
                         return 1
                     print("    RELAY_EXTEND2/EXTENDED2 successful")
+                    output.verbose(f"EXTENDED2 ← {router.nickname}")
 
             print(f"\n  Circuit built with {len(circuit.hops)} hops!")
 
@@ -711,9 +762,11 @@ def cmd_circuit(args: argparse.Namespace) -> int:
 def cmd_resolve(args: argparse.Namespace) -> int:
     """Resolve a hostname through the Tor network."""
     try:
+        output.explain("Resolving hostname through the Tor network")
         consensus = get_consensus()
 
         # Build 3-hop circuit for DNS resolution using PathSelector
+        output.explain("Selecting 3-hop path for DNS resolution")
         selector = PathSelector(consensus=consensus)
         try:
             path = selector.select_path(num_hops=3)
@@ -722,8 +775,10 @@ def cmd_resolve(args: argparse.Namespace) -> int:
             return 1
 
         routers = path.routers
+        output.verbose(f"Selected path: {' → '.join(r.nickname for r in routers)}")
 
         # Fetch ntor keys for all routers
+        output.explain("Fetching cryptographic keys for each relay")
         ntor_keys = []
         for router in routers:
             result = get_ntor_key(router, consensus)
@@ -751,44 +806,62 @@ def cmd_resolve(args: argparse.Namespace) -> int:
 
         # Connect to first router
         first_router = routers[0]
+        output.explain("Establishing TLS connection to guard relay")
         print(f"\nConnecting to {first_router.nickname}...")
         conn = RelayConnection(host=first_router.ip, port=first_router.orport, timeout=30.0)
 
         try:
             conn.connect()
             print("  TLS connection established")
+            output.verbose(f"TLS connected to {first_router.ip}:{first_router.orport}")
 
+            output.explain("Performing link protocol handshake")
             if not conn.handshake():
                 print("  Link handshake failed", file=sys.stderr)
                 return 1
             print(f"  Link protocol: v{conn.link_protocol}")
+            output.verbose(f"Negotiated link protocol v{conn.link_protocol}")
 
             # Create circuit and extend through all hops
             circuit = Circuit.create(conn)
             print(f"  Circuit ID: {circuit.circ_id:#010x}")
+            output.debug(f"Circuit ID: {circuit.circ_id:#010x}")
 
             for i, (router, ntor_key) in enumerate(zip(routers, ntor_keys, strict=True)):
                 if i == 0:
+                    output.explain("Performing ntor handshake with guard relay")
                     print(f"\n  Hop {i+1}: Creating circuit to {router.nickname}...")
+                    output.verbose(f"CREATE2 → {router.nickname}")
+                    output.debug(f"ntor-onion-key: {ntor_key.hex()}")
                     if not circuit.extend_to(router.fingerprint, ntor_key):
                         print("    CREATE2 failed", file=sys.stderr)
                         return 1
                     print("    CREATE2/CREATED2 successful")
+                    output.verbose(f"CREATED2 ← {router.nickname}")
                 else:
+                    role = "middle" if i == 1 else "exit"
+                    output.explain(f"Extending circuit to {role} relay")
                     print(f"\n  Hop {i+1}: Extending to {router.nickname}...")
+                    output.verbose(f"RELAY_EXTEND2 → {router.nickname}")
+                    output.debug(f"ntor-onion-key: {ntor_key.hex()}")
                     if not circuit.extend_to(
                         router.fingerprint, ntor_key, ip=router.ip, port=router.orport
                     ):
                         print("    EXTEND2 failed", file=sys.stderr)
                         return 1
                     print("    RELAY_EXTEND2/EXTENDED2 successful")
+                    output.verbose(f"EXTENDED2 ← {router.nickname}")
 
             print(f"\n  Circuit built with {len(circuit.hops)} hops!")
+            output.verbose(f"Circuit complete with {len(circuit.hops)} hops")
 
             # Resolve the hostname
             hostname = args.hostname
+            output.explain("Sending DNS resolution request through circuit")
             print(f"\n  Resolving {hostname}...")
+            output.verbose(f"RELAY_RESOLVE → {hostname}")
             answers = circuit.resolve(hostname)
+            output.verbose(f"RELAY_RESOLVED ← {len(answers) if answers else 0} answers")
 
             if not answers:
                 print("  Resolution failed - no answers", file=sys.stderr)
@@ -835,12 +908,19 @@ def cmd_resolve(args: argparse.Namespace) -> int:
 def cmd_hidden_service(args: argparse.Namespace) -> int:
     """Access a Tor hidden service (v3 onion address)."""
     try:
+        output.explain("Accessing v3 hidden service (.onion address)")
+
         # Parse the onion address
+        output.explain("Parsing and validating onion address")
         try:
             onion = OnionAddress.parse(args.address)
         except ValueError as e:
             print(f"Invalid onion address: {e}", file=sys.stderr)
             return 1
+
+        output.verbose(f"Onion address version: {onion.version}")
+        output.debug(f"Public key: {onion.public_key.hex()}")
+        output.debug(f"Checksum: {onion.checksum.hex()}")
 
         # Display parsed address info
         print(f"Onion Address: {onion.address}")
@@ -849,8 +929,11 @@ def cmd_hidden_service(args: argparse.Namespace) -> int:
         print(f"  Checksum: {onion.checksum.hex()}")
 
         # Time period info
+        output.explain("Computing current time period for descriptor lookup")
         time_period = get_current_time_period()
         period_info = get_time_period_info()
+        output.verbose(f"Time period: {time_period}")
+        output.debug(f"Remaining: {period_info['remaining_minutes']:.1f} minutes")
         print(f"\nTime Period: {time_period}")
         print(f"  Remaining: {period_info['remaining_minutes']:.1f} minutes")
 
@@ -858,8 +941,10 @@ def cmd_hidden_service(args: argparse.Namespace) -> int:
         consensus = get_consensus()
 
         # Pre-fetch Ed25519 identities for all HSDir relays (only do this once)
+        output.explain("Fetching Ed25519 identities for HSDir relays")
         print("\nFetching HSDir Ed25519 identities...")
         ed25519_map = HSDirectoryRing.fetch_ed25519_map(consensus)
+        output.verbose(f"Found {len(ed25519_map)} Ed25519 identities")
         print(f"Found {len(ed25519_map)} Ed25519 identities")
 
         # Decode SRV values from consensus
@@ -873,11 +958,11 @@ def cmd_hidden_service(args: argparse.Namespace) -> int:
         if consensus.shared_rand_previous:
             srv_previous = base64.b64decode(consensus.shared_rand_previous[1])
 
-        if getattr(args, "debug", False):
+        if output.is_debug():
             srv_cur_hex = srv_current.hex() if srv_current else "None"
             srv_prev_hex = srv_previous.hex() if srv_previous else "None"
-            print(f"\n[debug] SRV current (SRV#{time_period}): {srv_cur_hex}")
-            print(f"[debug] SRV previous (SRV#{time_period-1}): {srv_prev_hex}")
+            output.debug(f"SRV current (SRV#{time_period}): {srv_cur_hex}")
+            output.debug(f"SRV previous (SRV#{time_period-1}): {srv_prev_hex}")
 
         # Empirically verified: Tor uses shared_rand_current for hsdir_index computation.
         # The blinded key is derived from the time period (SRV is not used in blinding).
@@ -892,8 +977,12 @@ def cmd_hidden_service(args: argparse.Namespace) -> int:
             return 1
 
         # Compute blinded key and subcredential for this time period
+        output.explain("Computing blinded public key for this time period")
         blinded_key = onion.compute_blinded_key(tp)
         subcredential = onion.compute_subcredential(tp)
+        output.verbose(f"Blinded key computed for period {tp}")
+        output.debug(f"Blinded key: {blinded_key.hex()}")
+        output.debug(f"Subcredential: {subcredential.hex()}")
         print(f"\nBlinded Key (period {tp}): {blinded_key.hex()}")
 
         # Build HSDir hashring using the SRV from the period start.
@@ -918,10 +1007,11 @@ def cmd_hidden_service(args: argparse.Namespace) -> int:
         hours_into_period = 24 - hours_into_period  # Convert remaining to elapsed
         use_previous_srv = hours_into_period >= 12  # Second half of period
 
-        if getattr(args, "debug", False):
+        if output.is_debug():
             srv_choice = "previous" if use_previous_srv else "current"
-            print(f"[debug] Hours into period: {hours_into_period:.1f}, using SRV {srv_choice}")
+            output.debug(f"Hours into period: {hours_into_period:.1f}, using SRV {srv_choice}")
 
+        output.explain("Building HSDir hashring for descriptor lookup")
         hsdir_ring = HSDirectoryRing(
             consensus, tp, use_second_srv=use_previous_srv, ed25519_map=ed25519_map
         )
@@ -931,11 +1021,14 @@ def cmd_hidden_service(args: argparse.Namespace) -> int:
             return 1
 
         srv_label = "previous" if use_previous_srv else "current"
+        output.verbose(f"HSDir ring: {hsdir_ring.size} relays, using SRV {srv_label}")
         print(f"\nHSDir Ring (using SRV {srv_label}, period {tp}): {hsdir_ring.size} relays")
 
         # Find responsible HSDirs (or use manually specified one)
+        output.explain("Finding responsible HSDirs for this onion address")
         if args.hsdir:
             # Manual HSDir selection
+            output.verbose(f"Using manually specified HSDir: {args.hsdir}")
             hsdir = _find_router(consensus, args.hsdir.strip())
             if hsdir is None:
                 print(f"HSDir not found: {args.hsdir}", file=sys.stderr)
@@ -946,12 +1039,16 @@ def cmd_hidden_service(args: argparse.Namespace) -> int:
         else:
             # Automatic HSDir selection
             hsdirs = hsdir_ring.get_responsible_hsdirs(blinded_key)
+            output.verbose(f"Found {len(hsdirs)} responsible HSDirs")
             print(f"Responsible HSDirs ({len(hsdirs)}):")
             for i, hsdir in enumerate(hsdirs):
+                output.debug(f"HSDir {i+1}: {hsdir.nickname} ({hsdir.fingerprint[:16]}...)")
                 print(f"  [{i+1}] {hsdir.nickname} ({hsdir.ip}:{hsdir.orport})")
 
         # Fetch descriptor from HSDirs (try first 6)
+        output.explain("Fetching hidden service descriptor from HSDir")
         for hsdir in hsdirs[:6]:
+            output.verbose(f"Trying HSDir: {hsdir.nickname}")
             print(f"\nFetching descriptor from {hsdir.nickname}...")
             try:
                 result = fetch_hs_descriptor(
@@ -959,7 +1056,7 @@ def cmd_hidden_service(args: argparse.Namespace) -> int:
                     hsdir=hsdir,
                     blinded_key=blinded_key,
                     timeout=get_timeout(),
-                    verbose=getattr(args, "debug", False),
+                    verbose=output.is_verbose() or output.is_debug(),
                 )
                 if result:
                     descriptor_text, hsdir_used = result
@@ -975,13 +1072,13 @@ def cmd_hidden_service(args: argparse.Namespace) -> int:
                 httpx.NetworkError,
             ) as e:
                 # Connection errors - retry with next HSDir
-                if getattr(args, "debug", False):
-                    print(f"  Connection error: {e}")
+                if output.is_debug():
+                    output.debug(f"Connection error: {e}")
                 else:
                     print(f"  Failed to connect to {hsdir.nickname}, trying next...")
             except Exception as e:  # pylint: disable=broad-exception-caught
                 # Other errors - log and retry
-                if getattr(args, "debug", False):
+                if output.is_debug():
                     traceback.print_exc()
                 else:
                     print(f"  Failed: {type(e).__name__}, trying next...")
@@ -990,12 +1087,18 @@ def cmd_hidden_service(args: argparse.Namespace) -> int:
             print("\nFailed to fetch descriptor from any HSDir", file=sys.stderr)
             return 1
 
+        output.verbose(f"Descriptor fetched: {len(descriptor_text)} bytes")
+
         # Parse and decrypt the descriptor
+        output.explain("Parsing and decrypting hidden service descriptor")
         try:
             descriptor = parse_hs_descriptor(descriptor_text, blinded_key, subcredential)
         except ValueError as e:
             print(f"\nFailed to parse descriptor: {e}", file=sys.stderr)
             return 1
+
+        output.verbose(f"Descriptor parsed: version {descriptor.outer.version}")
+        output.debug(f"Revision counter: {descriptor.outer.revision_counter}")
 
         # Display descriptor info
         print("\nDescriptor Info:")
@@ -1032,6 +1135,8 @@ def cmd_hidden_service(args: argparse.Namespace) -> int:
 def cmd_connect(args: argparse.Namespace) -> int:  # noqa: PLR0915
     """Connect to a destination through Tor (clearnet or .onion)."""
     try:
+        output.explain("Connecting to destination through Tor network")
+
         # Parse address:port
         try:
             target_addr, target_port = _parse_address_port(args.destination)
@@ -1039,11 +1144,15 @@ def cmd_connect(args: argparse.Namespace) -> int:  # noqa: PLR0915
             print(f"Invalid destination format: {e}", file=sys.stderr)
             return 1
 
+        output.verbose(f"Target: {target_addr}:{target_port}")
+
         # Detect if this is an onion address
         is_onion = target_addr.endswith(".onion")
 
         if is_onion:
+            output.explain("Detected .onion address, using hidden service protocol")
             return _connect_onion(args, target_addr, target_port)
+        output.explain("Connecting to clearnet destination through exit relay")
         return _connect_clearnet(args, target_addr, target_port)
 
     # pylint: disable-next=broad-exception-caught
@@ -1055,9 +1164,11 @@ def cmd_connect(args: argparse.Namespace) -> int:  # noqa: PLR0915
 
 def _connect_clearnet(args: argparse.Namespace, target_addr: str, target_port: int) -> int:
     """Connect to a clearnet destination through Tor."""
+    output.explain("Building circuit to connect to clearnet destination")
     consensus = get_consensus()
 
     num_hops = getattr(args, "hops", 3)
+    output.verbose(f"Building {num_hops}-hop circuit for port {target_port}")
 
     # Resolve pre-specified routers
     exit_spec = vars(args).get("exit")
@@ -1084,6 +1195,7 @@ def _connect_clearnet(args: argparse.Namespace, target_addr: str, target_port: i
             return 1
 
     # Use PathSelector for bandwidth-weighted selection
+    output.explain("Selecting path through the network (bandwidth-weighted)")
     selector = PathSelector(consensus=consensus)
     try:
         path = selector.select_path(
@@ -1099,12 +1211,14 @@ def _connect_clearnet(args: argparse.Namespace, target_addr: str, target_port: i
 
     routers = path.routers
     roles = path.roles
+    output.verbose(f"Selected path: {' → '.join(r.nickname for r in routers)}")
 
     # Warn if exit doesn't have Exit flag
     if path.exit is not None and "Exit" not in path.exit.flags:
         print(f"Warning: {path.exit.nickname} does not have Exit flag", file=sys.stderr)
 
     # Fetch ntor keys for all routers
+    output.explain("Fetching cryptographic keys for each relay")
     ntor_keys = []
     for router in routers:
         result = get_ntor_key(router, consensus)
@@ -1131,21 +1245,26 @@ def _connect_clearnet(args: argparse.Namespace, target_addr: str, target_port: i
 
     # Connect to first router
     first_router = routers[0]
+    output.explain("Establishing TLS connection to guard relay")
     print(f"\nConnecting to {first_router.nickname}...")
     conn = RelayConnection(host=first_router.ip, port=first_router.orport, timeout=get_timeout())
 
     try:
         conn.connect()
         print("  TLS connection established")
+        output.verbose(f"TLS connected to {first_router.ip}:{first_router.orport}")
 
+        output.explain("Performing link protocol handshake")
         if not conn.handshake():
             print("  Link handshake failed", file=sys.stderr)
             return 1
         print(f"  Link protocol: v{conn.link_protocol}")
+        output.verbose(f"Link protocol version: {conn.link_protocol}")
 
         # Create circuit and extend through all hops
         circuit = Circuit.create(conn)
         print(f"  Circuit ID: {circuit.circ_id:#010x}")
+        output.debug(f"Circuit ID: {circuit.circ_id:#010x}")
 
         for i, (router, ntor_key) in enumerate(zip(routers, ntor_keys, strict=True)):
             if i == 0:
@@ -1195,8 +1314,8 @@ def _connect_onion(args: argparse.Namespace, target_addr: str, target_port: int)
         print(f"Invalid onion address: {e}", file=sys.stderr)
         return 1
 
-    print(f"Connecting to {target_addr}:{target_port}")
-    print(f"  Public key: {onion.public_key.hex()[:32]}...")
+    print(f"Connecting to {target_addr}:{target_port}", file=sys.stderr)
+    print(f"  Public key: {onion.public_key.hex()[:32]}...", file=sys.stderr)
 
     # Get consensus
     consensus = get_consensus()
@@ -1206,9 +1325,9 @@ def _connect_onion(args: argparse.Namespace, target_addr: str, target_port: int)
     period_info = get_time_period_info()
 
     # Pre-fetch Ed25519 identities for HSDir relays
-    print("\nFetching HSDir Ed25519 identities...")
+    print("\nFetching HSDir Ed25519 identities...", file=sys.stderr)
     ed25519_map = HSDirectoryRing.fetch_ed25519_map(consensus)
-    print(f"Found {len(ed25519_map)} Ed25519 identities")
+    print(f"Found {len(ed25519_map)} Ed25519 identities", file=sys.stderr)
 
     # Decode SRV values
     import base64
@@ -1251,7 +1370,7 @@ def _connect_onion(args: argparse.Namespace, target_addr: str, target_port: int)
     # Fetch descriptor
     descriptor_text = None
     for hsdir in hsdirs[:6]:
-        print(f"\nFetching descriptor from {hsdir.nickname}...")
+        print(f"\nFetching descriptor from {hsdir.nickname}...", file=sys.stderr)
         try:
             result = fetch_hs_descriptor(
                 consensus=consensus,
@@ -1259,23 +1378,23 @@ def _connect_onion(args: argparse.Namespace, target_addr: str, target_port: int)
                 blinded_key=blinded_key,
                 timeout=get_timeout(),
                 use_3hop_circuit=True,
-                verbose=getattr(args, "debug", False),
+                verbose=output.is_verbose() or output.is_debug(),
             )
             if result:
                 descriptor_text, hsdir_used = result
-                print(f"  Descriptor fetched from {hsdir_used.nickname}")
+                print(f"  Descriptor fetched from {hsdir_used.nickname}", file=sys.stderr)
                 break
-            print(f"  Failed to fetch from {hsdir.nickname}")
+            print(f"  Failed to fetch from {hsdir.nickname}", file=sys.stderr)
         except (ConnectionError, OSError, TimeoutError, httpx.HTTPError) as e:
-            if getattr(args, "debug", False):
-                print(f"  Connection error: {e}")
+            if output.is_debug():
+                output.debug(f"Connection error: {e}")
             else:
-                print(f"  Failed to connect to {hsdir.nickname}, trying next...")
+                print(f"  Failed to connect to {hsdir.nickname}, trying next...", file=sys.stderr)
         except Exception as e:  # pylint: disable=broad-exception-caught
-            if getattr(args, "debug", False):
+            if output.is_debug():
                 traceback.print_exc()
             else:
-                print(f"  Failed: {type(e).__name__}, trying next...")
+                print(f"  Failed: {type(e).__name__}, trying next...", file=sys.stderr)
 
     if descriptor_text is None:
         print("\nFailed to fetch descriptor from any HSDir", file=sys.stderr)
@@ -1293,21 +1412,20 @@ def _connect_onion(args: argparse.Namespace, target_addr: str, target_port: int)
         print(f"\nCannot connect: {error}", file=sys.stderr)
         return 1
 
-    print(f"\nFound {len(descriptor.introduction_points)} introduction points")
+    print(f"\nFound {len(descriptor.introduction_points)} introduction points", file=sys.stderr)
 
     # Perform rendezvous
     try:
-        verbose = getattr(args, "debug", False)
         rend_result = rendezvous_connect(
             consensus=consensus,
             onion_address=onion,
             introduction_points=descriptor.introduction_points,
             subcredential=subcredential,
             timeout=get_timeout(),
-            verbose=verbose,
+            verbose=output.is_verbose() or output.is_debug(),
         )
 
-        print(f"\nConnected! Opening stream to port {target_port}...")
+        print(f"\nConnected! Opening stream to port {target_port}...", file=sys.stderr)
         stream_id = rend_result.circuit.begin_stream(target_addr, target_port)
         if stream_id is None:
             print("Failed to open stream", file=sys.stderr)
@@ -1315,7 +1433,7 @@ def _connect_onion(args: argparse.Namespace, target_addr: str, target_port: int)
             rend_result.connection.close()
             return 1
 
-        print(f"Stream opened (id={stream_id})")
+        print(f"Stream opened (id={stream_id})", file=sys.stderr)
 
         # Send and receive data
         exit_code = _send_and_receive(args, rend_result.circuit, stream_id, target_addr)
@@ -1343,6 +1461,9 @@ def _send_and_receive(
                     "ascii"
                 )
             )
+        elif request_file == "-":
+            # Read from stdin
+            request_bytes = sys.stdin.buffer.read()
         else:
             assert request_file is not None  # Guaranteed by the if condition
             with open(request_file, "rb") as f:
@@ -1355,7 +1476,7 @@ def _send_and_receive(
         print("  Waiting for response...")
         response_data = b""
         for _ in range(100):
-            chunk = circuit.recv_data(stream_id, debug=getattr(args, "debug", False))
+            chunk = circuit.recv_data(stream_id, debug=output.is_debug())
             if chunk is None:
                 break
             response_data += chunk
@@ -1413,6 +1534,18 @@ def main() -> int:
         formatter_class=_SubcommandHelpFormatter,
     )
 
+    # Global flags (available on all commands)
+    parser.add_argument(
+        "-e", "--explain", action="store_true", help="Show brief explanations of what's happening"
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=0,
+        help="Increase verbosity (-v for protocol info, -vv for debug)",
+    )
+
     subparsers = parser.add_subparsers(dest="command", metavar="", title="commands")
 
     # version command
@@ -1457,7 +1590,6 @@ def main() -> int:
         "--auth-key", metavar="BASE64", help="Client authorization key for private HS"
     )
     hs_parser.add_argument("--hsdir", metavar="FINGERPRINT", help="Manually specify HSDir to use")
-    hs_parser.add_argument("--debug", action="store_true", help="Enable debug output")
 
     # select-path command
     path_parser = subparsers.add_parser(
@@ -1470,7 +1602,6 @@ def main() -> int:
     path_parser.add_argument("--middle", metavar="ROUTER", help="Middle router (default: random)")
     path_parser.add_argument("--exit", metavar="ROUTER", help="Exit router (default: random)")
     path_parser.add_argument("--port", type=int, metavar="PORT", help="Target port (filters exits)")
-    path_parser.add_argument("--debug", action="store_true", help="Enable debug output")
 
     # build-circuit command
     circuit_parser = subparsers.add_parser("build-circuit", help="Build a Tor circuit (1-3 hops)")
@@ -1485,7 +1616,6 @@ def main() -> int:
     circuit_parser.add_argument(
         "--port", type=int, metavar="PORT", help="Target port (filters exits)"
     )
-    circuit_parser.add_argument("--debug", action="store_true", help="Enable debug output")
 
     # resolve command
     resolve_parser = subparsers.add_parser(
@@ -1502,7 +1632,9 @@ def main() -> int:
         metavar="ADDR:PORT",
         help="Destination address:port (use [ipv6]:port for IPv6)",
     )
-    connect_parser.add_argument("--file", metavar="FILE", help="File containing request to send")
+    connect_parser.add_argument(
+        "--file", metavar="FILE", help="File containing request to send (use - for stdin)"
+    )
     connect_parser.add_argument("--http-get", action="store_true", help="Send HTTP GET request")
     connect_parser.add_argument(
         "--hops", type=int, choices=[1, 2, 3], default=3, help="Number of hops (default: 3)"
@@ -1514,9 +1646,17 @@ def main() -> int:
     connect_parser.add_argument(
         "--auth-key", metavar="BASE64", help="Client authorization key (onion only)"
     )
-    connect_parser.add_argument("--debug", action="store_true", help="Enable debug output")
 
     args = parser.parse_args()
+
+    # Configure output verbosity from global flags
+    # -v enables verbose, -vv enables both verbose and debug
+    verbosity = args.verbose
+    output.configure(
+        explain=args.explain,
+        verbose=verbosity >= 1,
+        debug=verbosity >= 2,
+    )
 
     if args.command is None:
         parser.print_help()
