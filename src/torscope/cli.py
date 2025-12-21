@@ -500,13 +500,55 @@ def _find_router(consensus: ConsensusDocument, query: str) -> RouterStatusEntry 
     return None
 
 
-def cmd_circuit(args: argparse.Namespace) -> int:  # pylint: disable=too-many-return-statements
-    """Build a circuit (1-3 hops), optionally open a stream and send data."""
+def _parse_address_port(addr_port: str) -> tuple[str, int]:
+    """Parse address:port string, handling IPv6 bracket notation.
+
+    Examples:
+        example.com:80 -> ("example.com", 80)
+        192.168.1.1:443 -> ("192.168.1.1", 443)
+        [::1]:8080 -> ("::1", 8080)
+        [2001:db8::1]:80 -> ("2001:db8::1", 80)
+
+    Raises:
+        ValueError: If format is invalid
+    """
+    if addr_port.startswith("["):
+        # IPv6 with brackets: [addr]:port
+        bracket_end = addr_port.find("]")
+        if bracket_end == -1:
+            raise ValueError(f"Invalid IPv6 address format: {addr_port}")
+        addr = addr_port[1:bracket_end]
+        rest = addr_port[bracket_end + 1 :]
+        if not rest.startswith(":"):
+            raise ValueError(f"Missing port after IPv6 address: {addr_port}")
+        try:
+            port = int(rest[1:])
+        except ValueError:
+            raise ValueError(f"Invalid port: {rest[1:]}") from None
+    else:
+        # IPv4 or hostname: addr:port
+        if ":" not in addr_port:
+            raise ValueError(f"Missing port in address: {addr_port}")
+        # Find the last colon (in case of bare IPv6 without brackets, though not recommended)
+        last_colon = addr_port.rfind(":")
+        addr = addr_port[:last_colon]
+        try:
+            port = int(addr_port[last_colon + 1 :])
+        except ValueError:
+            raise ValueError(f"Invalid port: {addr_port[last_colon + 1:]}") from None
+
+    if not 1 <= port <= 65535:
+        raise ValueError(f"Port out of range: {port}")
+
+    return addr, port
+
+
+def cmd_circuit(args: argparse.Namespace) -> int:
+    """Build a Tor circuit (1-3 hops)."""
     try:
         consensus = get_consensus()
 
         num_hops = args.hops
-        target_port = args.port  # For exit policy matching
 
         # Resolve pre-specified routers
         exit_spec = vars(args).get("exit")  # 'exit' is a builtin name
@@ -537,7 +579,6 @@ def cmd_circuit(args: argparse.Namespace) -> int:  # pylint: disable=too-many-re
         try:
             path = selector.select_path(
                 num_hops=num_hops,
-                target_port=target_port,
                 guard=guard,
                 middle=middle,
                 exit_router=exit_router,
@@ -549,14 +590,7 @@ def cmd_circuit(args: argparse.Namespace) -> int:  # pylint: disable=too-many-re
         routers = path.routers
         roles = path.roles
 
-        # Check if stream requested
-        has_stream = args.target is not None and args.port is not None
-
-        # Warn if exit doesn't have Exit flag (only for multi-hop with stream)
-        if has_stream and path.exit is not None and "Exit" not in path.exit.flags:
-            print(f"Warning: {path.exit.nickname} does not have Exit flag", file=sys.stderr)
-
-        # Fetch descriptors for all routers
+        # Fetch ntor keys for all routers
         ntor_keys = []
         for router in routers:
             result = get_ntor_key(router, consensus)
@@ -567,32 +601,16 @@ def cmd_circuit(args: argparse.Namespace) -> int:  # pylint: disable=too-many-re
             ntor_keys.append(ntor_key)
 
             # Report source for each router
-            if from_cache:
-                # Using locally cached microdescriptor
-                if source_type == "dircache":
-                    msg = f"Using {router.nickname}'s microdescriptor "
-                    msg += f"from {source_name} (cache)"
-                    print(msg, file=sys.stderr)
-                elif source_type == "authority":
-                    msg = f"Using {router.nickname}'s microdescriptor "
-                    msg += f"from {source_name} (authority)"
-                    print(msg, file=sys.stderr)
-                else:
-                    print(f"Using {router.nickname}'s microdescriptor from cache", file=sys.stderr)
+            action = "Using" if from_cache else "Fetched"
+            if source_type in ("dircache", "authority"):
+                label = "cache" if source_type == "dircache" else "authority"
+                msg = f"{action} {router.nickname}'s microdescriptor from {source_name} ({label})"
+                print(msg, file=sys.stderr)
+            elif source_type == "descriptor":
+                msg = f"{action} {router.nickname}'s descriptor from {source_name}"
+                print(msg, file=sys.stderr)
             else:
-                # Freshly fetched
-                if source_type == "dircache":
-                    msg = f"Fetched {router.nickname}'s microdescriptor "
-                    msg += f"from {source_name} (cache)"
-                    print(msg, file=sys.stderr)
-                elif source_type == "authority":
-                    msg = f"Fetched {router.nickname}'s microdescriptor "
-                    msg += f"from {source_name} (authority)"
-                    print(msg, file=sys.stderr)
-                elif source_type == "descriptor":
-                    msg = f"Fetched {router.nickname}'s descriptor "
-                    msg += f"from {source_name} (authority)"
-                    print(msg, file=sys.stderr)
+                print(f"{action} {router.nickname}'s microdescriptor from cache", file=sys.stderr)
 
         print(f"\nBuilding {num_hops}-hop circuit:")
         for i, (role, r) in enumerate(zip(roles, routers, strict=True)):
@@ -642,50 +660,6 @@ def cmd_circuit(args: argparse.Namespace) -> int:  # pylint: disable=too-many-re
                 if hop.keys:
                     kf = hop.keys.key_forward.hex()[:8]
                     print(f"    [{i+1}] {hop.fingerprint[:16]}... Kf={kf}...")
-
-            # Open stream if target specified
-            if has_stream:
-                print(f"\n  Opening stream to {args.target}:{args.port}...")
-                stream_id = circuit.begin_stream(args.target, args.port)
-
-                if stream_id is None:
-                    print("    Stream rejected by exit router", file=sys.stderr)
-                    circuit.destroy()
-                    return 1
-
-                print(f"    Stream opened (stream_id={stream_id})")
-
-                # Send data if provided
-                if args.data:
-                    # Decode escape sequences like \r\n
-                    request_data = args.data.encode("utf-8").decode("unicode_escape")
-                    print(f"\n  Sending {len(request_data)} bytes...")
-                    circuit.send_data(stream_id, request_data.encode("ascii"))
-
-                    # Receive response
-                    print("  Waiting for response...")
-                    response_data = b""
-                    debug = getattr(args, "debug", False)
-                    for _ in range(10):  # Read up to 10 data cells
-                        data = circuit.recv_data(stream_id, debug=debug)
-                        if data is None:
-                            break
-                        response_data += data
-
-                    if response_data:
-                        print(f"\n  Response ({len(response_data)} bytes):")
-                        print("  " + "-" * 50)
-                        # Show response (limit to 1000 chars)
-                        response_text = response_data[:1000].decode("utf-8", errors="replace")
-                        for line in response_text.split("\n"):
-                            print(f"  {line}")
-                        if len(response_data) > 1000:
-                            print("  ...")
-                        print("  " + "-" * 50)
-                    else:
-                        print("  No response data received")
-
-                print("\n  Stream test successful!")
 
             # Clean up
             circuit.destroy()
@@ -1018,65 +992,6 @@ def cmd_hidden_service(args: argparse.Namespace) -> int:
         else:
             print(f"\n[Descriptor decryption failed: {descriptor.decryption_error}]")
 
-        # Rendezvous protocol (if --connect)
-        if args.connect:
-            if not descriptor.decrypted or not descriptor.introduction_points:
-                print("\nCannot connect: descriptor not decrypted or no introduction points")
-                return 1
-
-            port = args.connect
-            print(f"\nConnecting to {onion.address}:{port}...")
-
-            try:
-                verbose = getattr(args, "debug", False)
-                rend_result = rendezvous_connect(
-                    consensus=consensus,
-                    onion_address=onion,
-                    introduction_points=descriptor.introduction_points,
-                    subcredential=subcredential,
-                    timeout=args.timeout,
-                    verbose=verbose,
-                )
-
-                print(f"\nConnected! Opening stream to port {port}...")
-                stream_id = rend_result.circuit.begin_stream(onion.address, port)
-                if stream_id is None:
-                    print("Failed to open stream")
-                    rend_result.circuit.destroy()
-                    rend_result.connection.close()
-                    return 1
-
-                print(f"Stream opened (id={stream_id})")
-
-                # Simple HTTP GET as a test
-                request = f"GET / HTTP/1.0\r\nHost: {onion.address}\r\n\r\n"
-                rend_result.circuit.send_data(stream_id, request.encode())
-
-                # Read response
-                response_data = b""
-                for _ in range(100):
-                    chunk = rend_result.circuit.recv_data(stream_id)
-                    if chunk is None:
-                        break
-                    response_data += chunk
-
-                if response_data:
-                    # Show first part of response
-                    text = response_data.decode("utf-8", errors="replace")
-                    lines = text.split("\n")
-                    print("\nResponse:")
-                    for line in lines[:20]:
-                        print(f"  {line}")
-                    if len(lines) > 20:
-                        print(f"  ... ({len(lines) - 20} more lines)")
-
-                rend_result.circuit.destroy()
-                rend_result.connection.close()
-
-            except RendezvousError as e:
-                print(f"\nRendezvous failed: {e}")
-                return 1
-
         return 0
 
     # pylint: disable-next=broad-exception-caught
@@ -1084,6 +999,349 @@ def cmd_hidden_service(args: argparse.Namespace) -> int:
         print(f"Error: {e}", file=sys.stderr)
         traceback.print_exc()
         return 1
+
+
+def cmd_connect(args: argparse.Namespace) -> int:  # noqa: PLR0915
+    """Connect to a destination through Tor (clearnet or .onion)."""
+    try:
+        # Parse address:port
+        try:
+            target_addr, target_port = _parse_address_port(args.destination)
+        except ValueError as e:
+            print(f"Invalid destination format: {e}", file=sys.stderr)
+            return 1
+
+        # Detect if this is an onion address
+        is_onion = target_addr.endswith(".onion")
+
+        if is_onion:
+            return _connect_onion(args, target_addr, target_port)
+        return _connect_clearnet(args, target_addr, target_port)
+
+    # pylint: disable-next=broad-exception-caught
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        traceback.print_exc()
+        return 1
+
+
+def _connect_clearnet(args: argparse.Namespace, target_addr: str, target_port: int) -> int:
+    """Connect to a clearnet destination through Tor."""
+    consensus = get_consensus()
+
+    num_hops = getattr(args, "hops", 3)
+
+    # Resolve pre-specified routers
+    exit_spec = vars(args).get("exit")
+    guard = None
+    middle = None
+    exit_router = None
+
+    if args.guard:
+        guard = _find_router(consensus, args.guard.strip())
+        if guard is None:
+            print(f"Guard router not found: {args.guard}", file=sys.stderr)
+            return 1
+
+    if args.middle and num_hops >= 3:
+        middle = _find_router(consensus, args.middle.strip())
+        if middle is None:
+            print(f"Middle router not found: {args.middle}", file=sys.stderr)
+            return 1
+
+    if exit_spec and num_hops >= 2:
+        exit_router = _find_router(consensus, exit_spec.strip())
+        if exit_router is None:
+            print(f"Exit router not found: {exit_spec}", file=sys.stderr)
+            return 1
+
+    # Use PathSelector for bandwidth-weighted selection
+    selector = PathSelector(consensus=consensus)
+    try:
+        path = selector.select_path(
+            num_hops=num_hops,
+            target_port=target_port,
+            guard=guard,
+            middle=middle,
+            exit_router=exit_router,
+        )
+    except ValueError as e:
+        print(f"Path selection failed: {e}", file=sys.stderr)
+        return 1
+
+    routers = path.routers
+    roles = path.roles
+
+    # Warn if exit doesn't have Exit flag
+    if path.exit is not None and "Exit" not in path.exit.flags:
+        print(f"Warning: {path.exit.nickname} does not have Exit flag", file=sys.stderr)
+
+    # Fetch ntor keys for all routers
+    ntor_keys = []
+    for router in routers:
+        result = get_ntor_key(router, consensus)
+        if result is None:
+            print(f"No ntor-onion-key for {router.nickname}", file=sys.stderr)
+            return 1
+        ntor_key, source_name, source_type, from_cache = result
+        ntor_keys.append(ntor_key)
+
+        action = "Using" if from_cache else "Fetched"
+        if source_type in ("dircache", "authority"):
+            label = "cache" if source_type == "dircache" else "authority"
+            msg = f"{action} {router.nickname}'s microdescriptor from {source_name} ({label})"
+            print(msg, file=sys.stderr)
+        elif source_type == "descriptor":
+            msg = f"{action} {router.nickname}'s descriptor from {source_name}"
+            print(msg, file=sys.stderr)
+        else:
+            print(f"{action} {router.nickname}'s microdescriptor from cache", file=sys.stderr)
+
+    print(f"\nBuilding {num_hops}-hop circuit:")
+    for i, (role, r) in enumerate(zip(roles, routers, strict=True)):
+        print(f"  [{i+1}] {role}: {r.nickname} ({r.ip}:{r.orport})")
+
+    # Connect to first router
+    first_router = routers[0]
+    print(f"\nConnecting to {first_router.nickname}...")
+    conn = RelayConnection(host=first_router.ip, port=first_router.orport, timeout=args.timeout)
+
+    try:
+        conn.connect()
+        print("  TLS connection established")
+
+        if not conn.handshake():
+            print("  Link handshake failed", file=sys.stderr)
+            return 1
+        print(f"  Link protocol: v{conn.link_protocol}")
+
+        # Create circuit and extend through all hops
+        circuit = Circuit.create(conn)
+        print(f"  Circuit ID: {circuit.circ_id:#010x}")
+
+        for i, (router, ntor_key) in enumerate(zip(routers, ntor_keys, strict=True)):
+            if i == 0:
+                print(f"\n  Hop {i+1}: Creating circuit to {router.nickname}...")
+                if not circuit.extend_to(router.fingerprint, ntor_key):
+                    print("    CREATE2 failed", file=sys.stderr)
+                    return 1
+                print("    CREATE2/CREATED2 successful")
+            else:
+                print(f"\n  Hop {i+1}: Extending to {router.nickname}...")
+                if not circuit.extend_to(
+                    router.fingerprint, ntor_key, ip=router.ip, port=router.orport
+                ):
+                    print("    EXTEND2 failed", file=sys.stderr)
+                    return 1
+                print("    RELAY_EXTEND2/EXTENDED2 successful")
+
+        print(f"\n  Circuit built with {len(circuit.hops)} hops!")
+
+        # Open stream
+        print(f"\n  Opening stream to {target_addr}:{target_port}...")
+        stream_id = circuit.begin_stream(target_addr, target_port)
+
+        if stream_id is None:
+            print("    Stream rejected by exit router", file=sys.stderr)
+            circuit.destroy()
+            return 1
+
+        print(f"    Stream opened (stream_id={stream_id})")
+
+        # Send and receive data
+        return _send_and_receive(args, circuit, stream_id, target_addr)
+
+    except ConnectionError as e:
+        print(f"  Connection error: {e}", file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
+
+
+def _connect_onion(args: argparse.Namespace, target_addr: str, target_port: int) -> int:
+    """Connect to an onion service through Tor."""
+    # Parse the onion address
+    try:
+        onion = OnionAddress.parse(target_addr)
+    except ValueError as e:
+        print(f"Invalid onion address: {e}", file=sys.stderr)
+        return 1
+
+    print(f"Connecting to {target_addr}:{target_port}")
+    print(f"  Public key: {onion.public_key.hex()[:32]}...")
+
+    # Get consensus
+    consensus = get_consensus()
+
+    # Time period info
+    time_period = get_current_time_period()
+    period_info = get_time_period_info()
+
+    # Pre-fetch Ed25519 identities for HSDir relays
+    print("\nFetching HSDir Ed25519 identities...")
+    ed25519_map = HSDirectoryRing.fetch_ed25519_map(consensus)
+    print(f"Found {len(ed25519_map)} Ed25519 identities")
+
+    # Decode SRV values
+    import base64
+
+    srv_current = None
+    if consensus.shared_rand_current:
+        srv_current = base64.b64decode(consensus.shared_rand_current[1])
+
+    if srv_current is None:
+        print("Error: No current SRV in consensus", file=sys.stderr)
+        return 1
+
+    # Compute blinded key and subcredential
+    blinded_key = onion.compute_blinded_key(time_period)
+    subcredential = onion.compute_subcredential(time_period)
+
+    # Determine which SRV to use
+    hours_into_period = 24 - (period_info["remaining_minutes"] / 60)
+    use_previous_srv = hours_into_period >= 12
+
+    hsdir_ring = HSDirectoryRing(
+        consensus, time_period, use_second_srv=use_previous_srv, ed25519_map=ed25519_map
+    )
+
+    if hsdir_ring.size == 0:
+        print("Error: No HSDirs in ring", file=sys.stderr)
+        return 1
+
+    # Find responsible HSDirs (or use manually specified one)
+    hsdir_arg = getattr(args, "hsdir", None)
+    if hsdir_arg:
+        hsdir = _find_router(consensus, hsdir_arg.strip())
+        if hsdir is None:
+            print(f"HSDir not found: {hsdir_arg}", file=sys.stderr)
+            return 1
+        hsdirs = [hsdir]
+    else:
+        hsdirs = hsdir_ring.get_responsible_hsdirs(blinded_key)
+
+    # Fetch descriptor
+    descriptor_text = None
+    for hsdir in hsdirs[:6]:
+        print(f"\nFetching descriptor from {hsdir.nickname}...")
+        try:
+            result = fetch_hs_descriptor(
+                consensus=consensus,
+                hsdir=hsdir,
+                blinded_key=blinded_key,
+                timeout=args.timeout,
+                use_3hop_circuit=True,
+                verbose=getattr(args, "debug", False),
+            )
+            if result:
+                descriptor_text, hsdir_used = result
+                print(f"  Descriptor fetched from {hsdir_used.nickname}")
+                break
+            print(f"  Failed to fetch from {hsdir.nickname}")
+        except (ConnectionError, OSError, TimeoutError, httpx.HTTPError) as e:
+            if getattr(args, "debug", False):
+                print(f"  Connection error: {e}")
+            else:
+                print(f"  Failed to connect to {hsdir.nickname}, trying next...")
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            if getattr(args, "debug", False):
+                traceback.print_exc()
+            else:
+                print(f"  Failed: {type(e).__name__}, trying next...")
+
+    if descriptor_text is None:
+        print("\nFailed to fetch descriptor from any HSDir", file=sys.stderr)
+        return 1
+
+    # Parse and decrypt descriptor
+    try:
+        descriptor = parse_hs_descriptor(descriptor_text, blinded_key, subcredential)
+    except ValueError as e:
+        print(f"\nFailed to parse descriptor: {e}", file=sys.stderr)
+        return 1
+
+    if not descriptor.decrypted or not descriptor.introduction_points:
+        error = descriptor.decryption_error or "no introduction points"
+        print(f"\nCannot connect: {error}", file=sys.stderr)
+        return 1
+
+    print(f"\nFound {len(descriptor.introduction_points)} introduction points")
+
+    # Perform rendezvous
+    try:
+        verbose = getattr(args, "debug", False)
+        rend_result = rendezvous_connect(
+            consensus=consensus,
+            onion_address=onion,
+            introduction_points=descriptor.introduction_points,
+            subcredential=subcredential,
+            timeout=args.timeout,
+            verbose=verbose,
+        )
+
+        print(f"\nConnected! Opening stream to port {target_port}...")
+        stream_id = rend_result.circuit.begin_stream(target_addr, target_port)
+        if stream_id is None:
+            print("Failed to open stream", file=sys.stderr)
+            rend_result.circuit.destroy()
+            rend_result.connection.close()
+            return 1
+
+        print(f"Stream opened (id={stream_id})")
+
+        # Send and receive data
+        exit_code = _send_and_receive(args, rend_result.circuit, stream_id, target_addr)
+
+        rend_result.circuit.destroy()
+        rend_result.connection.close()
+        return exit_code
+
+    except RendezvousError as e:
+        print(f"\nRendezvous failed: {e}", file=sys.stderr)
+        return 1
+
+
+def _send_and_receive(
+    args: argparse.Namespace, circuit: Circuit, stream_id: int, target_addr: str
+) -> int:
+    """Send data and receive response on a stream."""
+    http_get = getattr(args, "http_get", False)
+    data: str | None = getattr(args, "data", None)
+
+    if data or http_get:
+        if http_get:
+            request_data = f"GET / HTTP/1.1\r\nHost: {target_addr}\r\nConnection: close\r\n\r\n"
+        else:
+            assert data is not None  # Guaranteed by the if condition
+            request_data = data.encode("utf-8").decode("unicode_escape")
+
+        print(f"\n  Sending {len(request_data)} bytes...")
+        circuit.send_data(stream_id, request_data.encode("ascii"))
+
+        # Receive response
+        print("  Waiting for response...")
+        response_data = b""
+        for _ in range(100):
+            chunk = circuit.recv_data(stream_id, debug=getattr(args, "debug", False))
+            if chunk is None:
+                break
+            response_data += chunk
+
+        if response_data:
+            print(f"\n  Response ({len(response_data)} bytes):")
+            print("  " + "-" * 50)
+            response_text = response_data[:2000].decode("utf-8", errors="replace")
+            for line in response_text.split("\n"):
+                print(f"  {line}")
+            if len(response_data) > 2000:
+                print("  ...")
+            print("  " + "-" * 50)
+        else:
+            print("  No response data received")
+
+    circuit.destroy()
+    print("\n  Connection closed")
+    return 0
 
 
 class _SubcommandHelpFormatter(argparse.RawDescriptionHelpFormatter):
@@ -1129,7 +1387,7 @@ def main() -> int:
     subparsers.add_parser("version", help="Display the torscope version")
 
     # clear command
-    subparsers.add_parser("clear", help="Clear cached consensus")
+    subparsers.add_parser("clear", help="Clear cache")
 
     # authorities command
     subparsers.add_parser("authorities", help="List all directory authorities")
@@ -1159,58 +1417,9 @@ def main() -> int:
         "query", metavar="nickname|fingerprint", help="Router nickname or fingerprint"
     )
 
-    # path command
-    path_parser = subparsers.add_parser(
-        "path", help="Select a path through the Tor network (bandwidth-weighted)"
-    )
-    path_parser.add_argument(
-        "--hops", type=int, choices=[1, 2, 3], default=3, help="Number of hops (default: 3)"
-    )
-    path_parser.add_argument("--guard", metavar="ROUTER", help="Guard router (default: random)")
-    path_parser.add_argument("--middle", metavar="ROUTER", help="Middle router (default: random)")
-    path_parser.add_argument("--exit", metavar="ROUTER", help="Exit router (default: random)")
-    path_parser.add_argument("--port", type=int, metavar="PORT", help="Target port (filters exits)")
-    path_parser.add_argument("--debug", action="store_true", help="Enable debug output")
-
-    # circuit command
-    circuit_parser = subparsers.add_parser(
-        "circuit", help="Build a Tor circuit (1-3 hops), optionally open stream"
-    )
-    circuit_parser.add_argument(
-        "--hops", type=int, choices=[1, 2, 3], default=3, help="Number of hops (default: 3)"
-    )
-    circuit_parser.add_argument("--guard", metavar="ROUTER", help="Guard router (default: random)")
-    circuit_parser.add_argument(
-        "--middle", metavar="ROUTER", help="Middle router (default: random)"
-    )
-    circuit_parser.add_argument("--exit", metavar="ROUTER", help="Exit router (default: random)")
-    circuit_parser.add_argument("--target", metavar="HOST", help="Target hostname to connect to")
-    circuit_parser.add_argument("--port", type=int, metavar="PORT", help="Target port")
-    circuit_parser.add_argument(
-        "--data", metavar="DATA", help="ASCII data to send (use \\r\\n for line breaks)"
-    )
-    circuit_parser.add_argument(
-        "--timeout", type=float, default=30.0, help="Connection timeout (default: 30s)"
-    )
-    circuit_parser.add_argument("--debug", action="store_true", help="Enable debug output")
-
-    # resolve command
-    resolve_parser = subparsers.add_parser(
-        "resolve", help="Resolve hostname through Tor network (DNS)"
-    )
-    resolve_parser.add_argument("hostname", metavar="HOSTNAME", help="Hostname to resolve")
-
     # hidden-service command
-    hs_parser = subparsers.add_parser(
-        "hidden-service", help="Access a Tor hidden service (v3 onion)"
-    )
+    hs_parser = subparsers.add_parser("hidden-service", help="Show onion service descriptor")
     hs_parser.add_argument("address", metavar="ADDRESS", help="Onion address (56 chars)")
-    hs_parser.add_argument(
-        "--connect", type=int, metavar="PORT", help="Connect to hidden service on PORT"
-    )
-    hs_parser.add_argument(
-        "--data", metavar="DATA", help="ASCII data to send (use \\r\\n for line breaks)"
-    )
     hs_parser.add_argument(
         "--timeout", type=float, default=30.0, help="Connection timeout (default: 30s)"
     )
@@ -1222,6 +1431,65 @@ def main() -> int:
         "--direct", action="store_true", help="Connect directly to HSDir (1-hop, less privacy)"
     )
     hs_parser.add_argument("--debug", action="store_true", help="Enable debug output")
+
+    # select-path command
+    path_parser = subparsers.add_parser(
+        "select-path", help="Select a path through the Tor network (bandwidth-weighted)"
+    )
+    path_parser.add_argument(
+        "--hops", type=int, choices=[1, 2, 3], default=3, help="Number of hops (default: 3)"
+    )
+    path_parser.add_argument("--guard", metavar="ROUTER", help="Guard router (default: random)")
+    path_parser.add_argument("--middle", metavar="ROUTER", help="Middle router (default: random)")
+    path_parser.add_argument("--exit", metavar="ROUTER", help="Exit router (default: random)")
+    path_parser.add_argument("--port", type=int, metavar="PORT", help="Target port (filters exits)")
+    path_parser.add_argument("--debug", action="store_true", help="Enable debug output")
+
+    # build-circuit command
+    circuit_parser = subparsers.add_parser("build-circuit", help="Build a Tor circuit (1-3 hops)")
+    circuit_parser.add_argument(
+        "--hops", type=int, choices=[1, 2, 3], default=3, help="Number of hops (default: 3)"
+    )
+    circuit_parser.add_argument("--guard", metavar="ROUTER", help="Guard router (default: random)")
+    circuit_parser.add_argument(
+        "--middle", metavar="ROUTER", help="Middle router (default: random)"
+    )
+    circuit_parser.add_argument("--exit", metavar="ROUTER", help="Exit router (default: random)")
+    circuit_parser.add_argument(
+        "--timeout", type=float, default=30.0, help="Connection timeout (default: 30s)"
+    )
+    circuit_parser.add_argument("--debug", action="store_true", help="Enable debug output")
+
+    # resolve command
+    resolve_parser = subparsers.add_parser(
+        "resolve", help="Resolve hostname through Tor network (DNS)"
+    )
+    resolve_parser.add_argument("hostname", metavar="HOSTNAME", help="Hostname to resolve")
+
+    # connect command
+    connect_parser = subparsers.add_parser(
+        "connect", help="Connect to a destination through Tor (clearnet or .onion)"
+    )
+    connect_parser.add_argument(
+        "destination",
+        metavar="ADDR:PORT",
+        help="Destination address:port (use [ipv6]:port for IPv6)",
+    )
+    connect_parser.add_argument(
+        "--data", metavar="DATA", help="ASCII data to send (use \\r\\n for line breaks)"
+    )
+    connect_parser.add_argument("--http-get", action="store_true", help="Send HTTP GET request")
+    connect_parser.add_argument(
+        "--hops", type=int, choices=[1, 2, 3], default=3, help="Number of hops (default: 3)"
+    )
+    connect_parser.add_argument("--guard", metavar="ROUTER", help="Guard router (clearnet only)")
+    connect_parser.add_argument("--middle", metavar="ROUTER", help="Middle router (clearnet only)")
+    connect_parser.add_argument("--exit", metavar="ROUTER", help="Exit router (clearnet only)")
+    connect_parser.add_argument("--hsdir", metavar="FINGERPRINT", help="HSDir to use (onion only)")
+    connect_parser.add_argument(
+        "--timeout", type=float, default=30.0, help="Connection timeout (default: 30s)"
+    )
+    connect_parser.add_argument("--debug", action="store_true", help="Enable debug output")
 
     args = parser.parse_args()
 
@@ -1238,10 +1506,11 @@ def main() -> int:
         "routers": cmd_routers,
         "router": cmd_router,
         "extra-info": cmd_extra_info,
-        "path": cmd_path,
-        "circuit": cmd_circuit,
+        "select-path": cmd_path,
+        "build-circuit": cmd_circuit,
         "resolve": cmd_resolve,
         "hidden-service": cmd_hidden_service,
+        "connect": cmd_connect,
     }
 
     try:
