@@ -5,6 +5,7 @@ Provides command-line tools for exploring the Tor network.
 """
 
 import argparse
+import os
 import sys
 import traceback
 from collections.abc import Callable
@@ -34,6 +35,20 @@ from torscope.onion.circuit import Circuit
 from torscope.onion.connection import RelayConnection
 from torscope.onion.rendezvous import RendezvousError, rendezvous_connect
 from torscope.path import PathSelector
+
+# Default timeout for network operations (can be overridden with TORSCOPE_TIMEOUT env var)
+DEFAULT_TIMEOUT = 30.0
+
+
+def get_timeout() -> float:
+    """Get timeout from TORSCOPE_TIMEOUT env var or use default."""
+    env_timeout = os.environ.get("TORSCOPE_TIMEOUT")
+    if env_timeout:
+        try:
+            return float(env_timeout)
+        except ValueError:
+            print(f"Warning: Invalid TORSCOPE_TIMEOUT value: {env_timeout}", file=sys.stderr)
+    return DEFAULT_TIMEOUT
 
 
 def verify_consensus_signatures(consensus: ConsensusDocument) -> tuple[int, int]:
@@ -171,6 +186,17 @@ def cmd_routers(args: argparse.Namespace) -> int:
     """List routers from network consensus."""
     try:
         consensus = get_consensus()
+
+        # List available flags if requested
+        if args.list_flags:
+            all_flags: set[str] = set()
+            for router in consensus.routers:
+                all_flags.update(router.flags)
+            print("Available flags:")
+            for flag in sorted(all_flags):
+                count = sum(1 for r in consensus.routers if flag in r.flags)
+                print(f"  {flag:<15} ({count:,} routers)")
+            return 0
 
         # Filter routers
         routers = consensus.routers
@@ -579,6 +605,7 @@ def cmd_circuit(args: argparse.Namespace) -> int:
         try:
             path = selector.select_path(
                 num_hops=num_hops,
+                target_port=args.port,
                 guard=guard,
                 middle=middle,
                 exit_router=exit_router,
@@ -619,7 +646,9 @@ def cmd_circuit(args: argparse.Namespace) -> int:
         # Connect to first router
         first_router = routers[0]
         print(f"\nConnecting to {first_router.nickname}...")
-        conn = RelayConnection(host=first_router.ip, port=first_router.orport, timeout=args.timeout)
+        conn = RelayConnection(
+            host=first_router.ip, port=first_router.orport, timeout=get_timeout()
+        )
 
         try:
             conn.connect()
@@ -929,8 +958,7 @@ def cmd_hidden_service(args: argparse.Namespace) -> int:
                     consensus=consensus,
                     hsdir=hsdir,
                     blinded_key=blinded_key,
-                    timeout=args.timeout,
-                    use_3hop_circuit=not getattr(args, "direct", False),
+                    timeout=get_timeout(),
                     verbose=getattr(args, "debug", False),
                 )
                 if result:
@@ -1104,7 +1132,7 @@ def _connect_clearnet(args: argparse.Namespace, target_addr: str, target_port: i
     # Connect to first router
     first_router = routers[0]
     print(f"\nConnecting to {first_router.nickname}...")
-    conn = RelayConnection(host=first_router.ip, port=first_router.orport, timeout=args.timeout)
+    conn = RelayConnection(host=first_router.ip, port=first_router.orport, timeout=get_timeout())
 
     try:
         conn.connect()
@@ -1229,7 +1257,7 @@ def _connect_onion(args: argparse.Namespace, target_addr: str, target_port: int)
                 consensus=consensus,
                 hsdir=hsdir,
                 blinded_key=blinded_key,
-                timeout=args.timeout,
+                timeout=get_timeout(),
                 use_3hop_circuit=True,
                 verbose=getattr(args, "debug", False),
             )
@@ -1275,7 +1303,7 @@ def _connect_onion(args: argparse.Namespace, target_addr: str, target_port: int)
             onion_address=onion,
             introduction_points=descriptor.introduction_points,
             subcredential=subcredential,
-            timeout=args.timeout,
+            timeout=get_timeout(),
             verbose=verbose,
         )
 
@@ -1306,17 +1334,22 @@ def _send_and_receive(
 ) -> int:
     """Send data and receive response on a stream."""
     http_get = getattr(args, "http_get", False)
-    data: str | None = getattr(args, "data", None)
+    request_file: str | None = getattr(args, "file", None)
 
-    if data or http_get:
+    if request_file or http_get:
         if http_get:
-            request_data = f"GET / HTTP/1.1\r\nHost: {target_addr}\r\nConnection: close\r\n\r\n"
+            request_bytes = (
+                f"GET / HTTP/1.1\r\nHost: {target_addr}\r\nConnection: close\r\n\r\n".encode(
+                    "ascii"
+                )
+            )
         else:
-            assert data is not None  # Guaranteed by the if condition
-            request_data = data.encode("utf-8").decode("unicode_escape")
+            assert request_file is not None  # Guaranteed by the if condition
+            with open(request_file, "rb") as f:
+                request_bytes = f.read()
 
-        print(f"\n  Sending {len(request_data)} bytes...")
-        circuit.send_data(stream_id, request_data.encode("ascii"))
+        print(f"\n  Sending {len(request_bytes)} bytes...")
+        circuit.send_data(stream_id, request_bytes)
 
         # Receive response
         print("  Waiting for response...")
@@ -1377,7 +1410,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         prog="torscope",
         description="Tor Network Information Tool",
-        usage="torscope [options] <command> [command_options]",
         formatter_class=_SubcommandHelpFormatter,
     )
 
@@ -1400,6 +1432,7 @@ def main() -> int:
     routers_parser.add_argument(
         "--flags", metavar="FLAGS", help="Filter by flags (comma-separated)"
     )
+    routers_parser.add_argument("--list-flags", action="store_true", help="List available flags")
 
     # router command
     router_parser = subparsers.add_parser(
@@ -1419,17 +1452,11 @@ def main() -> int:
 
     # hidden-service command
     hs_parser = subparsers.add_parser("hidden-service", help="Show onion service descriptor")
-    hs_parser.add_argument("address", metavar="ADDRESS", help="Onion address (56 chars)")
-    hs_parser.add_argument(
-        "--timeout", type=float, default=30.0, help="Connection timeout (default: 30s)"
-    )
+    hs_parser.add_argument("address", metavar="ADDRESS", help="Onion address (v3, 56 chars)")
     hs_parser.add_argument(
         "--auth-key", metavar="BASE64", help="Client authorization key for private HS"
     )
     hs_parser.add_argument("--hsdir", metavar="FINGERPRINT", help="Manually specify HSDir to use")
-    hs_parser.add_argument(
-        "--direct", action="store_true", help="Connect directly to HSDir (1-hop, less privacy)"
-    )
     hs_parser.add_argument("--debug", action="store_true", help="Enable debug output")
 
     # select-path command
@@ -1456,7 +1483,7 @@ def main() -> int:
     )
     circuit_parser.add_argument("--exit", metavar="ROUTER", help="Exit router (default: random)")
     circuit_parser.add_argument(
-        "--timeout", type=float, default=30.0, help="Connection timeout (default: 30s)"
+        "--port", type=int, metavar="PORT", help="Target port (filters exits)"
     )
     circuit_parser.add_argument("--debug", action="store_true", help="Enable debug output")
 
@@ -1475,9 +1502,7 @@ def main() -> int:
         metavar="ADDR:PORT",
         help="Destination address:port (use [ipv6]:port for IPv6)",
     )
-    connect_parser.add_argument(
-        "--data", metavar="DATA", help="ASCII data to send (use \\r\\n for line breaks)"
-    )
+    connect_parser.add_argument("--file", metavar="FILE", help="File containing request to send")
     connect_parser.add_argument("--http-get", action="store_true", help="Send HTTP GET request")
     connect_parser.add_argument(
         "--hops", type=int, choices=[1, 2, 3], default=3, help="Number of hops (default: 3)"
@@ -1487,7 +1512,7 @@ def main() -> int:
     connect_parser.add_argument("--exit", metavar="ROUTER", help="Exit router (clearnet only)")
     connect_parser.add_argument("--hsdir", metavar="FINGERPRINT", help="HSDir to use (onion only)")
     connect_parser.add_argument(
-        "--timeout", type=float, default=30.0, help="Connection timeout (default: 30s)"
+        "--auth-key", metavar="BASE64", help="Client authorization key (onion only)"
     )
     connect_parser.add_argument("--debug", action="store_true", help="Enable debug output")
 
