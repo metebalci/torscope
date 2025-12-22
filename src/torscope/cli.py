@@ -5,7 +5,6 @@ Provides command-line tools for exploring the Tor network.
 """
 
 import argparse
-import os
 import sys
 import traceback
 from collections.abc import Callable
@@ -46,19 +45,16 @@ from torscope.onion.connection import RelayConnection
 from torscope.onion.rendezvous import RendezvousError, rendezvous_connect
 from torscope.path import PathSelector
 
-# Default timeout for network operations (can be overridden with TORSCOPE_TIMEOUT env var)
+# Default timeout for network operations
 DEFAULT_TIMEOUT = 30.0
+
+# Module-level timeout (set by --timeout flag)
+_timeout: float = DEFAULT_TIMEOUT
 
 
 def get_timeout() -> float:
-    """Get timeout from TORSCOPE_TIMEOUT env var or use default."""
-    env_timeout = os.environ.get("TORSCOPE_TIMEOUT")
-    if env_timeout:
-        try:
-            return float(env_timeout)
-        except ValueError:
-            print(f"Warning: Invalid TORSCOPE_TIMEOUT value: {env_timeout}", file=sys.stderr)
-    return DEFAULT_TIMEOUT
+    """Get timeout from --timeout flag or default."""
+    return _timeout
 
 
 def verify_consensus_signatures(consensus: ConsensusDocument) -> tuple[int, int]:
@@ -1725,6 +1721,13 @@ def main() -> int:
         default=0,
         help="Increase verbosity (-v for protocol info, -vv for debug)",
     )
+    parser.add_argument(
+        "-t",
+        "--timeout",
+        type=float,
+        metavar="SECS",
+        help=f"Network timeout in seconds (default: {DEFAULT_TIMEOUT})",
+    )
 
     subparsers = parser.add_subparsers(dest="command", metavar="", title="commands")
 
@@ -1886,6 +1889,11 @@ def main() -> int:
         verbose=verbosity >= 1,
         debug=verbosity >= 2,
     )
+
+    # Set global timeout if provided
+    global _timeout  # noqa: PLW0603
+    if args.timeout is not None:
+        _timeout = args.timeout
 
     if args.command is None:
         parser.print_help()
