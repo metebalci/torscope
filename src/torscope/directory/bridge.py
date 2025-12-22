@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from torscope.directory.models import ServerDescriptor
     from torscope.onion.circuit import Circuit
+    from torscope.onion.transport import Transport
 
 
 class BridgeParseError(Exception):
@@ -198,6 +199,47 @@ def validate_bridge(bridge: BridgeRelay) -> None:
         raise BridgeParseError(f"Unknown transport: {bridge.transport}")
 
 
+def create_transport(bridge: BridgeRelay, timeout: float = 30.0) -> Transport | None:
+    """
+    Create appropriate transport for a bridge.
+
+    Args:
+        bridge: BridgeRelay with transport configuration
+        timeout: Connection timeout in seconds
+
+    Returns:
+        Transport instance, or None for direct (non-PT) bridges
+
+    Raises:
+        BridgeParseError: If transport is unsupported or misconfigured
+    """
+    if bridge.transport is None:
+        return None  # Direct connection, no transport needed
+
+    transport_name = bridge.transport.lower()
+
+    if transport_name == "webtunnel":
+        # Import here to avoid circular imports
+        # pylint: disable=import-outside-toplevel
+        from torscope.onion.transport import WebTunnelTransport
+
+        url = bridge.transport_params.get("url")
+        if not url:
+            raise BridgeParseError("WebTunnel bridge requires 'url' parameter")
+        return WebTunnelTransport(
+            host=bridge.ip,
+            port=bridge.port,
+            url=url,
+            timeout=timeout,
+        )
+
+    # Other transports not yet implemented
+    raise BridgeParseError(
+        f"Pluggable transport '{bridge.transport}' not yet supported. "
+        "Supported transports: webtunnel"
+    )
+
+
 def fetch_bridge_descriptor(circuit: Circuit, fingerprint: str) -> ServerDescriptor | None:
     """
     Fetch a bridge's server descriptor via BEGIN_DIR.
@@ -267,6 +309,8 @@ def connect_to_bridge(
     Uses CREATE_FAST for the initial connection (doesn't require ntor key).
     Then fetches the bridge's descriptor to get the ntor key for extending.
 
+    Supports both direct bridges and pluggable transports (WebTunnel).
+
     Args:
         bridge: BridgeRelay to connect to
         timeout: Connection timeout in seconds
@@ -275,7 +319,7 @@ def connect_to_bridge(
         Tuple of (Circuit, ntor_key) where ntor_key may be None if not retrieved
 
     Raises:
-        BridgeParseError: If bridge has a pluggable transport (not yet supported)
+        BridgeParseError: If bridge transport is unsupported
         ConnectionError: If connection fails
         RuntimeError: If circuit creation fails
     """
@@ -283,14 +327,16 @@ def connect_to_bridge(
     from torscope.onion.circuit import Circuit
     from torscope.onion.connection import RelayConnection
 
-    if bridge.transport is not None:
-        raise BridgeParseError(
-            f"Pluggable transport '{bridge.transport}' not yet supported. "
-            "Use a direct bridge (no transport) for now."
-        )
+    # Create transport if needed (None for direct connections)
+    transport = create_transport(bridge, timeout=timeout)
 
-    # Connect to bridge
-    conn = RelayConnection(host=bridge.ip, port=bridge.port, timeout=timeout)
+    # Connect to bridge (using transport if available)
+    conn = RelayConnection(
+        host=bridge.ip,
+        port=bridge.port,
+        transport=transport,
+        timeout=timeout,
+    )
     conn.connect()
 
     if not conn.handshake():

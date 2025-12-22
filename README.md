@@ -51,6 +51,12 @@ It implements the Tor directory protocol and OR (Onion Router) protocol, allowin
 - Family and subnet exclusion
 - Port-based exit filtering
 
+### Bridge Relays
+- Bridge line parsing (direct and pluggable transport formats)
+- Direct bridge connections (no obfuscation)
+- WebTunnel pluggable transport (HTTPS/WebSocket tunneling)
+- Circuit building through bridges with CREATE_FAST
+
 ### Hidden Services (v3)
 - Onion address parsing and validation
 - Blinded key derivation (SHAKE-256)
@@ -76,8 +82,7 @@ It implements the Tor directory protocol and OR (Onion Router) protocol, allowin
 - XOFF/XON congestion control
 - Conflux (multi-path circuits)
 - AUTHENTICATE cell (relay authentication)
-- Pluggable transports
-- Bridge relay support
+- Pluggable transports: obfs4, Snowflake (WebTunnel is supported)
 
 ### Other
 - REST API
@@ -125,6 +130,15 @@ torscope open-stream duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.on
 # Access a private hidden service with client authorization
 torscope hidden-service private.onion --auth-key-file ~/.tor/onion_auth/private.auth_private
 torscope open-stream private.onion:80 --auth-key-file ~/.tor/onion_auth/private.auth_private
+
+# Build circuit through a direct bridge (no transport)
+torscope circuit --bridge "192.0.2.1:443 4352E58420E68F5E40BF7C74FADDCCD9D1349413"
+
+# Build circuit through a WebTunnel bridge
+torscope circuit --bridge "webtunnel 192.0.2.1:443 FINGERPRINT url=https://example.com/secret-path"
+
+# Open stream through a bridge
+torscope open-stream example.com:80 --bridge "192.0.2.1:443 FINGERPRINT" --http-get
 ```
 
 ## Verbosity Flags

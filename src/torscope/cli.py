@@ -567,11 +567,16 @@ def cmd_circuit(args: argparse.Namespace) -> int:
                 bridge = parse_bridge_line(args.bridge)
                 output.verbose(f"Using bridge: {bridge.address} ({bridge.short_fingerprint})")
                 if bridge.transport:
-                    print(
-                        f"Error: Pluggable transport '{bridge.transport}' not yet supported",
-                        file=sys.stderr,
-                    )
-                    return 1
+                    transport_name = bridge.transport.lower()
+                    supported_transports = ["webtunnel"]
+                    if transport_name not in supported_transports:
+                        print(
+                            f"Error: Pluggable transport '{bridge.transport}' not yet supported. "
+                            f"Supported: {', '.join(supported_transports)}",
+                            file=sys.stderr,
+                        )
+                        return 1
+                    output.verbose(f"Using transport: {bridge.transport}")
                 if num_hops < 2:
                     print("Error: Bridge requires at least 2 hops", file=sys.stderr)
                     return 1

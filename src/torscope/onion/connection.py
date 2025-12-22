@@ -5,12 +5,14 @@ This module implements the link-level connection to Tor relays,
 including TLS setup and the link handshake protocol.
 """
 
+from __future__ import annotations
+
 import socket
 import ssl
 import struct
 from dataclasses import dataclass, field
 from types import TracebackType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from torscope import output
 from torscope.onion.cell import (
@@ -24,6 +26,9 @@ from torscope.onion.cell import (
     VersionsCell,
 )
 
+if TYPE_CHECKING:
+    from torscope.onion.transport import Transport
+
 
 @dataclass
 class RelayConnection:
@@ -35,6 +40,7 @@ class RelayConnection:
 
     host: str
     port: int
+    transport: Transport | None = None  # None = direct TLS connection
     _socket: socket.socket | None = field(default=None, repr=False)
     _tls_socket: ssl.SSLSocket | None = field(default=None, repr=False)
     link_protocol: int = 0  # Negotiated link protocol version
@@ -52,7 +58,18 @@ class RelayConnection:
 
         Creates a TLS connection without validating the relay's certificate
         (Tor has its own certificate validation via CERTS cell).
+
+        If a transport is configured, uses the transport to establish the
+        connection instead of direct TLS.
         """
+        if self.transport is not None:
+            # Use pluggable transport
+            output.debug(f"Using transport to connect to {self.host}:{self.port}")
+            self._tls_socket = self.transport.connect()
+            output.debug("Transport connection established")
+            return
+
+        # Direct TLS connection
         output.debug(f"Creating TCP socket to {self.host}:{self.port}")
 
         # Create TCP socket
@@ -74,6 +91,12 @@ class RelayConnection:
 
     def close(self) -> None:
         """Close the connection."""
+        if self.transport is not None:
+            # Let transport handle cleanup
+            self.transport.close()
+            self._tls_socket = None
+            return
+
         if self._tls_socket:
             try:
                 self._tls_socket.close()
@@ -241,7 +264,7 @@ class RelayConnection:
         body = self._recv_exact(body_len)
         return Cell.unpack(header + body, self.link_protocol)
 
-    def __enter__(self) -> "RelayConnection":
+    def __enter__(self) -> RelayConnection:
         """Context manager entry."""
         self.connect()
         return self

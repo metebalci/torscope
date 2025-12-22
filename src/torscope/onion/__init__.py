@@ -38,6 +38,7 @@ from torscope.onion.relay import (
     parse_extended2_payload,
     parse_resolved_payload,
 )
+from torscope.onion.transport import TransportError, WebTunnelTransport
 
 __all__ = [
     # Address
@@ -81,4 +82,7 @@ __all__ = [
     "parse_connected_payload",
     "parse_extended2_payload",
     "parse_resolved_payload",
+    # Transport
+    "TransportError",
+    "WebTunnelTransport",
 ]
