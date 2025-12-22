@@ -23,6 +23,7 @@ from torscope.cli_helpers import find_router, parse_address_port
 from torscope.directory.authority import get_authorities
 from torscope.directory.certificates import KeyCertificateParser
 from torscope.directory.client import DirectoryClient
+from torscope.directory.client_auth import parse_client_auth_key, read_client_auth_file
 from torscope.directory.consensus import ConsensusParser
 from torscope.directory.descriptor import ServerDescriptorParser
 from torscope.directory.extra_info import ExtraInfoParser
@@ -869,6 +870,28 @@ def cmd_hidden_service(args: argparse.Namespace) -> int:
         output.debug(f"Public key: {onion.public_key.hex()}")
         output.debug(f"Checksum: {onion.checksum.hex()}")
 
+        # Read client authorization key (from file or direct)
+        client_privkey: bytes | None = None
+        if getattr(args, "auth_key_file", None):
+            try:
+                client_privkey = read_client_auth_file(args.auth_key_file)
+                output.verbose(f"Client authorization key loaded from {args.auth_key_file}")
+                output.debug(f"Client auth key: {client_privkey.hex()[:16]}...")
+            except FileNotFoundError:
+                print(f"Auth key file not found: {args.auth_key_file}", file=sys.stderr)
+                return 1
+            except ValueError as e:
+                print(f"Invalid auth key file: {e}", file=sys.stderr)
+                return 1
+        elif getattr(args, "auth_key", None):
+            try:
+                client_privkey = parse_client_auth_key(args.auth_key)
+                output.verbose("Client authorization key provided")
+                output.debug(f"Client auth key: {client_privkey.hex()[:16]}...")
+            except ValueError as e:
+                print(f"Invalid auth key: {e}", file=sys.stderr)
+                return 1
+
         # Display parsed address info
         print(f"Onion Address: {onion.address}")
         print(f"  Version: {onion.version}")
@@ -1039,7 +1062,9 @@ def cmd_hidden_service(args: argparse.Namespace) -> int:
         # Parse and decrypt the descriptor
         output.explain("Parsing and decrypting hidden service descriptor")
         try:
-            descriptor = parse_hs_descriptor(descriptor_text, blinded_key, subcredential)
+            descriptor = parse_hs_descriptor(
+                descriptor_text, blinded_key, subcredential, client_privkey=client_privkey
+            )
         except ValueError as e:
             print(f"\nFailed to parse descriptor: {e}", file=sys.stderr)
             return 1
@@ -1261,6 +1286,26 @@ def _open_stream_onion(args: argparse.Namespace, target_addr: str, target_port: 
         print(f"Invalid onion address: {e}", file=sys.stderr)
         return 1
 
+    # Read client authorization key (from file or direct)
+    client_privkey: bytes | None = None
+    if getattr(args, "auth_key_file", None):
+        try:
+            client_privkey = read_client_auth_file(args.auth_key_file)
+            print(f"  Client auth key loaded from {args.auth_key_file}", file=sys.stderr)
+        except FileNotFoundError:
+            print(f"Auth key file not found: {args.auth_key_file}", file=sys.stderr)
+            return 1
+        except ValueError as e:
+            print(f"Invalid auth key file: {e}", file=sys.stderr)
+            return 1
+    elif getattr(args, "auth_key", None):
+        try:
+            client_privkey = parse_client_auth_key(args.auth_key)
+            print("  Client authorization key provided", file=sys.stderr)
+        except ValueError as e:
+            print(f"Invalid auth key: {e}", file=sys.stderr)
+            return 1
+
     print(f"Connecting to {target_addr}:{target_port}", file=sys.stderr)
     print(f"  Public key: {onion.public_key.hex()[:32]}...", file=sys.stderr)
 
@@ -1349,14 +1394,27 @@ def _open_stream_onion(args: argparse.Namespace, target_addr: str, target_port: 
 
     # Parse and decrypt descriptor
     try:
-        descriptor = parse_hs_descriptor(descriptor_text, blinded_key, subcredential)
+        descriptor = parse_hs_descriptor(
+            descriptor_text, blinded_key, subcredential, client_privkey=client_privkey
+        )
     except ValueError as e:
         print(f"\nFailed to parse descriptor: {e}", file=sys.stderr)
         return 1
 
     if not descriptor.decrypted or not descriptor.introduction_points:
         error = descriptor.decryption_error or "no introduction points"
-        print(f"\nCannot connect: {error}", file=sys.stderr)
+        if client_privkey is None and "auth" in (error or "").lower():
+            print(
+                f"\nCannot connect: {error}",
+                file=sys.stderr,
+            )
+            print(
+                "Hint: This may be a private hidden service. "
+                "Use --auth-key-file to provide authorization.",
+                file=sys.stderr,
+            )
+        else:
+            print(f"\nCannot connect: {error}", file=sys.stderr)
         return 1
 
     print(f"\nFound {len(descriptor.introduction_points)} introduction points", file=sys.stderr)
@@ -1564,8 +1622,9 @@ def main() -> int:
     hs_parser = subparsers.add_parser("hidden-service", help="Show onion service descriptor")
     hs_parser.add_argument("address", metavar="ADDRESS", help="Onion address (v3, 56 chars)")
     hs_parser.add_argument(
-        "--auth-key", metavar="BASE64", help="Client authorization key for private HS"
+        "--auth-key-file", metavar="FILE", help="Client auth key file for private HS"
     )
+    hs_parser.add_argument("--auth-key", metavar="KEY", help="Client auth key (for testing)")
     hs_parser.add_argument("--hsdir", metavar="FINGERPRINT", help="Manually specify HSDir to use")
 
     # select-path command
@@ -1621,7 +1680,10 @@ def main() -> int:
     stream_parser.add_argument("--exit", metavar="ROUTER", help="Exit router (clearnet only)")
     stream_parser.add_argument("--hsdir", metavar="FINGERPRINT", help="HSDir to use (onion only)")
     stream_parser.add_argument(
-        "--auth-key", metavar="BASE64", help="Client authorization key (onion only)"
+        "--auth-key-file", metavar="FILE", help="Client auth key file (onion only)"
+    )
+    stream_parser.add_argument(
+        "--auth-key", metavar="KEY", help="Client auth key (onion only, for testing)"
     )
 
     # resolve command

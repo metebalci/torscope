@@ -371,6 +371,7 @@ def parse_hs_descriptor(
     content: str,
     blinded_key: bytes | None = None,
     subcredential: bytes | None = None,
+    client_privkey: bytes | None = None,
 ) -> HSDescriptor:
     """Parse a complete HS descriptor.
 
@@ -378,6 +379,7 @@ def parse_hs_descriptor(
         content: Raw descriptor text
         blinded_key: 32-byte blinded public key (required for decryption)
         subcredential: 32-byte subcredential (required for decryption)
+        client_privkey: Optional 32-byte X25519 private key for client auth
 
     Returns:
         Parsed HSDescriptor
@@ -392,6 +394,7 @@ def parse_hs_descriptor(
                 blinded_key,
                 subcredential,
                 outer.revision_counter,
+                client_privkey=client_privkey,
             )
             return HSDescriptor(
                 outer=outer,
@@ -547,7 +550,7 @@ def decrypt_inner_layer(
     )
 
 
-def _parse_first_layer(plaintext: bytes) -> bytes:
+def _parse_first_layer(plaintext: bytes) -> tuple[bytes, str]:
     """Parse the first layer plaintext to extract the encrypted blob.
 
     First layer format:
@@ -563,7 +566,8 @@ def _parse_first_layer(plaintext: bytes) -> bytes:
         plaintext: Decrypted first layer
 
     Returns:
-        The encrypted blob for the second layer
+        Tuple of (encrypted_blob, first_layer_text)
+        The text is needed for client auth parsing.
     """
     text = plaintext.decode("utf-8", errors="replace")
     lines = text.strip().split("\n")
@@ -580,7 +584,7 @@ def _parse_first_layer(plaintext: bytes) -> bytes:
                 if not lines[i].startswith("-----BEGIN"):
                     blob_lines.append(lines[i].strip())
                 i += 1
-            return base64.b64decode("".join(blob_lines))
+            return base64.b64decode("".join(blob_lines)), text
 
         i += 1
 
@@ -732,6 +736,7 @@ def decrypt_descriptor(
     subcredential: bytes,
     revision_counter: int,
     descriptor_cookie: bytes | None = None,
+    client_privkey: bytes | None = None,
 ) -> list[IntroductionPoint]:
     """Decrypt a v3 hidden service descriptor and parse introduction points.
 
@@ -739,12 +744,16 @@ def decrypt_descriptor(
     1. Outer layer (superencrypted) -> reveals auth data and inner blob
     2. Inner layer (encrypted) -> reveals introduction points
 
+    For private hidden services with client authorization, either provide
+    descriptor_cookie directly, or provide client_privkey to derive it.
+
     Args:
         superencrypted_blob: The superencrypted blob from the descriptor
         blinded_key: 32-byte blinded public key
         subcredential: 32-byte subcredential
         revision_counter: Descriptor revision counter
-        descriptor_cookie: Optional 32-byte client auth cookie
+        descriptor_cookie: Optional 32-byte client auth cookie (direct)
+        client_privkey: Optional 32-byte X25519 private key for client auth
 
     Returns:
         List of IntroductionPoint objects
@@ -757,8 +766,21 @@ def decrypt_descriptor(
         superencrypted_blob, blinded_key, subcredential, revision_counter
     )
 
-    # Parse first layer to get the encrypted blob
-    encrypted_blob = _parse_first_layer(first_layer_plaintext)
+    # Parse first layer to get the encrypted blob and text
+    encrypted_blob, first_layer_text = _parse_first_layer(first_layer_plaintext)
+
+    # If client_privkey provided, try to derive descriptor_cookie
+    if client_privkey is not None and descriptor_cookie is None:
+        from torscope.directory.client_auth import get_descriptor_cookie
+
+        # get_descriptor_cookie returns the cookie if we're an authorized client,
+        # or None if no auth entries exist or our key doesn't match any.
+        # If None, we fall back to public decryption (no cookie).
+        descriptor_cookie = get_descriptor_cookie(
+            first_layer_text=first_layer_text,
+            client_privkey=client_privkey,
+            subcredential=subcredential,
+        )
 
     # Decrypt inner layer
     second_layer_plaintext = decrypt_inner_layer(

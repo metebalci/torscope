@@ -57,6 +57,10 @@ It implements the Tor directory protocol and OR (Onion Router) protocol, allowin
 - HSDir hashring selection
 - Descriptor fetching from HSDir
 - Outer descriptor parsing and signature verification
+- Inner descriptor decryption (introduction point extraction)
+- Client authorization for private services (x25519 auth keys)
+- Full rendezvous protocol (ESTABLISH_RENDEZVOUS, INTRODUCE1, RENDEZVOUS2)
+- hs-ntor handshake (Curve25519 + SHA3-256 + SHAKE-256)
 
 ### Cryptography
 - Curve25519 key exchange
@@ -75,17 +79,15 @@ It implements the Tor directory protocol and OR (Onion Router) protocol, allowin
 - Pluggable transports
 - Bridge relay support
 
-### Hidden Services
-- Inner descriptor decryption (introduction point extraction)
-- Full rendezvous protocol (INTRODUCE1, RENDEZVOUS2)
-- Client authorization for private services
-- Onion service publication (server-side)
-
 ### Other
+- REST API
+
+## Won't Implement
+
 - Running as a Tor relay
 - Control protocol (stem-like interface)
 - Connection pooling/reuse
-- REST API
+- Onion service publication (server-side)
 
 # Installation
 
@@ -95,12 +97,49 @@ pip install torscope
 
 # Usage
 
+```bash
+# List directory authorities
+torscope authorities
+
+# List routers with specific flags
+torscope routers --flags Guard,Exit
+
+# Show router details
+torscope router moria1
+
+# Build a 3-hop circuit
+torscope circuit
+
+# Resolve hostname through Tor
+torscope resolve example.com
+
+# Connect to a website through Tor
+torscope open-stream example.com:80 --http-get
+
+# Access a hidden service
+torscope hidden-service duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion
+
+# Connect to a hidden service
+torscope open-stream duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion:80 --http-get
+
+# Access a private hidden service with client authorization
+torscope hidden-service private.onion --auth-key-file ~/.tor/onion_auth/private.auth_private
+torscope open-stream private.onion:80 --auth-key-file ~/.tor/onion_auth/private.auth_private
+```
+
+## Verbosity Flags
+
+```bash
+-e, --explain   # Brief explanations of what's happening
+-v              # Protocol-level information
+-vv             # Raw debug information (implies -v)
+```
+
 ## Example Onion Addresses
 
-- torscope75efu4gls3m24xezterv7nhj36ibnjlrocqeslclwbxgs7yd.onion
-- 2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion
 - duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion
-- dwnewsgngmhlplxy6o2twtfgjnrnjxbegbwqx6wnotdhkzt562tszfid.onion
+- 2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion
+- torscope75efu4gls3m24xezterv7nhj36ibnjlrocqeslclwbxgs7yd.onion
 
 # License
 
