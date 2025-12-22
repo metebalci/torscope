@@ -203,7 +203,7 @@ class TestCreateTransport:
             ip="192.0.2.1",
             port=443,
             fingerprint="4352E58420E68F5E40BF7C74FADDCCD9D1349413",
-            transport="obfs4",
+            transport="snowflake",  # Not yet implemented
         )
         with pytest.raises(BridgeParseError, match="not yet supported"):
             create_transport(bridge)

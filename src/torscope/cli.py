@@ -568,7 +568,7 @@ def cmd_circuit(args: argparse.Namespace) -> int:
                 output.verbose(f"Using bridge: {bridge.address} ({bridge.short_fingerprint})")
                 if bridge.transport:
                     transport_name = bridge.transport.lower()
-                    supported_transports = ["webtunnel"]
+                    supported_transports = ["webtunnel", "obfs4"]
                     if transport_name not in supported_transports:
                         print(
                             f"Error: Pluggable transport '{bridge.transport}' not yet supported. "

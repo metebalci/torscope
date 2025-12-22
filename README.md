@@ -55,6 +55,7 @@ It implements the Tor directory protocol and OR (Onion Router) protocol, allowin
 - Bridge line parsing (direct and pluggable transport formats)
 - Direct bridge connections (no obfuscation)
 - WebTunnel pluggable transport (HTTPS/WebSocket tunneling)
+- obfs4 pluggable transport (traffic obfuscation with Elligator2)
 - Circuit building through bridges with CREATE_FAST
 
 ### Hidden Services (v3)
@@ -82,7 +83,7 @@ It implements the Tor directory protocol and OR (Onion Router) protocol, allowin
 - XOFF/XON congestion control
 - Conflux (multi-path circuits)
 - AUTHENTICATE cell (relay authentication)
-- Pluggable transports: obfs4, Snowflake (WebTunnel is supported)
+- Pluggable transports: Snowflake, meek (obfs4 and WebTunnel are supported)
 
 ### Other
 - REST API
@@ -137,8 +138,14 @@ torscope circuit --bridge "192.0.2.1:443 4352E58420E68F5E40BF7C74FADDCCD9D134941
 # Build circuit through a WebTunnel bridge
 torscope circuit --bridge "webtunnel 192.0.2.1:443 FINGERPRINT url=https://example.com/secret-path"
 
+# Build circuit through an obfs4 bridge
+torscope circuit --bridge "obfs4 192.0.2.1:443 FINGERPRINT cert=ABC...xyz iat-mode=0"
+
 # Open stream through a bridge
 torscope open-stream example.com:80 --bridge "192.0.2.1:443 FINGERPRINT" --http-get
+
+# Open stream through an obfs4 bridge
+torscope open-stream example.com:80 --bridge "obfs4 192.0.2.1:443 FINGERPRINT cert=... iat-mode=0" --http-get
 ```
 
 ## Verbosity Flags

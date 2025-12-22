@@ -233,10 +233,33 @@ def create_transport(bridge: BridgeRelay, timeout: float = 30.0) -> Transport | 
             timeout=timeout,
         )
 
+    if transport_name == "obfs4":
+        # Import here to avoid circular imports
+        # pylint: disable=import-outside-toplevel
+        from torscope.onion.obfs4 import Obfs4Transport
+
+        cert = bridge.transport_params.get("cert")
+        if not cert:
+            raise BridgeParseError("obfs4 bridge requires 'cert' parameter")
+
+        iat_mode_str = bridge.transport_params.get("iat-mode", "0")
+        try:
+            iat_mode = int(iat_mode_str)
+        except ValueError:
+            iat_mode = 0
+
+        return Obfs4Transport(
+            host=bridge.ip,
+            port=bridge.port,
+            cert=cert,
+            iat_mode=iat_mode,
+            timeout=timeout,
+        )
+
     # Other transports not yet implemented
     raise BridgeParseError(
         f"Pluggable transport '{bridge.transport}' not yet supported. "
-        "Supported transports: webtunnel"
+        "Supported transports: webtunnel, obfs4"
     )
 
 
