@@ -163,8 +163,19 @@ class Circuit:
 
         if response.command == CellCommand.CREATED2:
             # Extract HDATA from CREATED2 payload
-            hlen = struct.unpack(">H", response.payload[0:2])[0]
-            hdata = response.payload[2 : 2 + hlen]
+            payload = response.payload
+            if len(payload) < 2:
+                output.debug(f"CREATED2 payload too short: {len(payload)}")
+                self.state = CircuitState.FAILED
+                return False
+
+            hlen = struct.unpack(">H", payload[0:2])[0]
+            if len(payload) < 2 + hlen:
+                output.debug(f"CREATED2 hdata truncated: need {2 + hlen}, have {len(payload)}")
+                self.state = CircuitState.FAILED
+                return False
+
+            hdata = payload[2 : 2 + hlen]
             output.debug(f"CREATED2 hdata: {hlen} bytes")
 
             # Complete handshake and derive keys

@@ -8,6 +8,7 @@ See: https://spec.torproject.org/tor-spec/relay-cells.html
 """
 
 import hashlib
+import hmac
 import socket
 import struct
 from dataclasses import dataclass, field
@@ -15,15 +16,30 @@ from enum import IntEnum
 
 from cryptography.hazmat.primitives.ciphers import Cipher, CipherContext, algorithms, modes
 
-# Relay cell body length (509 bytes for link protocol 4+)
-# Total cell is 514 bytes: 4 (circ_id) + 1 (command) + 509 (payload)
+# Relay cell format (tor-spec section 6.1)
+# https://spec.torproject.org/tor-spec/relay-cells.html
+#
+# Relay cell payload structure (when decrypted):
+#   +----------+------------+-----------+--------+--------+------+---------+
+#   | Command  | Recognized | StreamID  | Digest | Length | Data | Padding |
+#   | 1 byte   |  2 bytes   |  2 bytes  | 4 bytes| 2 bytes| var  |  var    |
+#   +----------+------------+-----------+--------+--------+------+---------+
+#   |<-------------------------- 509 bytes -------------------------------->|
+#
+# - Command: Relay command (BEGIN, DATA, END, etc.)
+# - Recognized: Set to 0 when cell is for us (used for layered decryption)
+# - StreamID: Stream identifier (0 for control, >0 for data streams)
+# - Digest: First 4 bytes of running SHA-1 digest (for integrity)
+# - Length: Number of data bytes (0-498)
+# - Data: Actual payload data
+# - Padding: Random padding to fill 509 bytes
 RELAY_BODY_LEN = 509
 
-# Relay header length
+# Relay header: Command(1) + Recognized(2) + StreamID(2) + Digest(4) + Length(2)
 RELAY_HEADER_LEN = 11
 
-# Maximum data in a relay cell
-RELAY_DATA_LEN = RELAY_BODY_LEN - RELAY_HEADER_LEN  # 498 bytes
+# Maximum data in a relay cell: 509 - 11 = 498 bytes
+RELAY_DATA_LEN = RELAY_BODY_LEN - RELAY_HEADER_LEN
 
 
 class RelayCommand(IntEnum):
@@ -384,8 +400,8 @@ class RelayCrypto:
         self._digest_backward_state.update(zeroed_payload)
         expected_digest = self._digest_backward_state.copy().digest()[:4]
 
-        # Verify digest
-        if received_digest != expected_digest:
+        # Verify digest (constant-time comparison to prevent timing attacks)
+        if not hmac.compare_digest(received_digest, expected_digest):
             # Digest mismatch - cell is corrupted or not for us
             return None
 
@@ -579,7 +595,16 @@ def parse_extended2_payload(payload: bytes) -> bytes:
     Returns:
         HDATA (server handshake response)
     """
+    # Bounds check: need at least 2 bytes for HLEN
+    if len(payload) < 2:
+        raise ValueError(f"EXTENDED2 payload too short: {len(payload)} < 2")
+
     hlen = struct.unpack(">H", payload[0:2])[0]
+
+    # Bounds check: ensure HDATA is complete
+    if len(payload) < 2 + hlen:
+        raise ValueError(f"EXTENDED2 hdata truncated: need {2 + hlen}, have {len(payload)}")
+
     return payload[2 : 2 + hlen]
 
 

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from torscope.directory.consensus import ConsensusParser
 from torscope.directory.models import ConsensusDocument, Microdescriptor
+from torscope.utils import pad_base64
 
 CACHE_DIR = Path(".torscope")
 CONSENSUS_FILE = CACHE_DIR / "consensus.bin"
@@ -54,15 +55,12 @@ def _filename_to_digest(filename: str) -> str:
     except ValueError:
         # Fallback: assume old format with replaced chars
         base = hex_str.replace("_", "/").replace("-", "+")
-        padding = (4 - len(base) % 4) % 4
-        return base + "=" * padding
+        return pad_base64(base)
 
 
 def _normalize_digest(digest: str) -> str:
     """Normalize digest to padded base64."""
-    stripped = digest.rstrip("=")
-    padding = (4 - len(stripped) % 4) % 4
-    return stripped + "=" * padding
+    return pad_base64(digest)
 
 
 def save_consensus(content: bytes, source: str, source_type: str = "authority") -> None:
@@ -264,12 +262,8 @@ def get_ntor_key_from_cache(digest: str) -> tuple[bytes, str, str] | None:
         return None
 
     # Decode base64 key (add padding if needed)
-    padding = (4 - len(ntor_key_b64) % 4) % 4
-    if padding:
-        ntor_key_b64 += "=" * padding
-
     try:
-        ntor_key = base64.b64decode(ntor_key_b64)
+        ntor_key = base64.b64decode(pad_base64(ntor_key_b64))
     except ValueError:
         return None
 
@@ -298,12 +292,8 @@ def get_ed25519_from_cache(digest: str) -> bytes | None:
         return None
 
     # Decode base64 key (add padding if needed)
-    padding = (4 - len(ed25519_b64) % 4) % 4
-    if padding:
-        ed25519_b64 += "=" * padding
-
     try:
-        return base64.b64decode(ed25519_b64)
+        return base64.b64decode(pad_base64(ed25519_b64))
     except ValueError:
         return None
 

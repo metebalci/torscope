@@ -44,7 +44,16 @@ class CellCommand(IntEnum):
         return command == cls.VERSIONS or command >= 128
 
 
-# Cell sizes
+# Cell sizes (tor-spec section 3)
+# https://spec.torproject.org/tor-spec/cell-packet-format.html
+#
+# Fixed-length cell format:
+#   Link v3:  CircID(2) + Command(1) + Payload(509) = 512 bytes
+#   Link v4+: CircID(4) + Command(1) + Payload(509) = 514 bytes
+#
+# Variable-length cell format:
+#   Link v3:  CircID(2) + Command(1) + Length(2) + Payload(variable)
+#   Link v4+: CircID(4) + Command(1) + Length(2) + Payload(variable)
 CELL_LEN_V3 = 512  # Cell length for link protocol <= 3
 CELL_LEN_V4 = 514  # Cell length for link protocol >= 4
 CIRCID_LEN_V3 = 2  # CircID length for link protocol <= 3
@@ -275,14 +284,30 @@ class CertsCell:
         payload = data[header_len:]
         offset = 0
 
+        # Bounds check: need at least 1 byte for num_certs
+        if len(payload) < 1:
+            raise ValueError("CERTS payload too short: missing num_certs")
+
         # Number of certificates
         num_certs = payload[offset]
         offset += 1
 
         certificates = []
-        for _ in range(num_certs):
+        for i in range(num_certs):
+            # Bounds check: need at least 3 bytes for cert_type(1) + cert_len(2)
+            if offset + 3 > len(payload):
+                raise ValueError(
+                    f"CERTS cell truncated at certificate {i}: need header at offset {offset}"
+                )
+
             cert_type = payload[offset]
             cert_len = struct.unpack(">H", payload[offset + 1 : offset + 3])[0]
+
+            # Bounds check: ensure cert_data is complete
+            if offset + 3 + cert_len > len(payload):
+                available = len(payload) - offset - 3
+                raise ValueError(f"CERTS truncated: cert {i} needs {cert_len}B, have {available}B")
+
             cert_data = payload[offset + 3 : offset + 3 + cert_len]
             certificates.append((cert_type, cert_data))
             offset += 3 + cert_len
@@ -379,8 +404,17 @@ class Create2Cell:
         cell = Cell.unpack(data, link_protocol)
         payload = cell.payload
 
+        # Bounds check: need at least 4 bytes for HTYPE(2) + HLEN(2)
+        if len(payload) < 4:
+            raise ValueError(f"CREATE2 payload too short: {len(payload)} < 4")
+
         htype = struct.unpack(">H", payload[0:2])[0]
         hlen = struct.unpack(">H", payload[2:4])[0]
+
+        # Bounds check: ensure HDATA is complete
+        if len(payload) < 4 + hlen:
+            raise ValueError(f"CREATE2 hdata truncated: need {4 + hlen}, have {len(payload)}")
+
         hdata = payload[4 : 4 + hlen]
 
         return cls(circ_id=cell.circ_id, htype=htype, hdata=hdata)
@@ -412,7 +446,16 @@ class Created2Cell:
         cell = Cell.unpack(data, link_protocol)
         payload = cell.payload
 
+        # Bounds check: need at least 2 bytes for HLEN
+        if len(payload) < 2:
+            raise ValueError(f"CREATED2 payload too short: {len(payload)} < 2")
+
         hlen = struct.unpack(">H", payload[0:2])[0]
+
+        # Bounds check: ensure HDATA is complete
+        if len(payload) < 2 + hlen:
+            raise ValueError(f"CREATED2 hdata truncated: need {2 + hlen}, have {len(payload)}")
+
         hdata = payload[2 : 2 + hlen]
 
         return cls(circ_id=cell.circ_id, hdata=hdata)

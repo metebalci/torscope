@@ -11,6 +11,7 @@ with v3 hidden services. It differs from regular ntor:
 See: https://spec.torproject.org/rend-spec/introduction-protocol.html
 """
 
+import hmac
 import os
 import struct
 from dataclasses import dataclass
@@ -255,8 +256,8 @@ class HsNtorClientState:
         )
         expected_auth = hs_ntor_mac(auth_input, T_HSMAC)
 
-        # Verify server's auth
-        if auth != expected_auth:
+        # Verify server's auth (constant-time comparison to prevent timing attacks)
+        if not hmac.compare_digest(auth, expected_auth):
             return None
 
         # Derive circuit keys

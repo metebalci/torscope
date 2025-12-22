@@ -31,6 +31,21 @@ from torscope.onion.circuit import Circuit
 from torscope.onion.connection import RelayConnection
 from torscope.path import PathSelector
 
+# Ed25519 certificate format (tor-spec appendix A.1)
+# https://spec.torproject.org/cert-spec.html
+#
+# Certificate structure:
+#   VERSION      (1 byte)  - offset 0
+#   CERT_TYPE    (1 byte)  - offset 1
+#   EXPIRATION   (4 bytes) - offset 2-5
+#   KEY_TYPE     (1 byte)  - offset 6
+#   CERTIFIED_KEY (32 bytes) - offset 7-38
+#   N_EXTENSIONS (1 byte)  - offset 39
+#   ...extensions...
+ED25519_CERT_KEY_OFFSET = 7
+ED25519_CERT_KEY_LEN = 32
+ED25519_CERT_MIN_LEN = ED25519_CERT_KEY_OFFSET + ED25519_CERT_KEY_LEN  # 39 bytes
+
 
 @dataclass
 class HSDescriptorOuter:
@@ -649,12 +664,11 @@ def _parse_introduction_points(plaintext: bytes) -> list[IntroductionPoint]:
                         cert_lines.append(lines[i].strip())
                     i += 1
                 cert_data = base64.b64decode("".join(cert_lines))
-                # Extract the auth key from the cert
-                # Ed25519 cert format: VERSION(1) + CERT_TYPE(1) + EXPIRATION(4) +
-                # KEY_TYPE(1) + CERTIFIED_KEY(32) + ...
-                # CERTIFIED_KEY is at offset 7, length 32 bytes
-                if len(cert_data) >= 39:
-                    current_ip.auth_key = cert_data[7:39]
+                # Extract the auth key (CERTIFIED_KEY) from the Ed25519 certificate
+                if len(cert_data) >= ED25519_CERT_MIN_LEN:
+                    current_ip.auth_key = cert_data[
+                        ED25519_CERT_KEY_OFFSET : ED25519_CERT_KEY_OFFSET + ED25519_CERT_KEY_LEN
+                    ]
 
         i += 1
 

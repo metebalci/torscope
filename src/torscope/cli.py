@@ -19,6 +19,7 @@ from torscope.cache import (
     load_consensus,
     save_consensus,
 )
+from torscope.cli_helpers import find_router, parse_address_port
 from torscope.directory.authority import get_authorities
 from torscope.directory.certificates import KeyCertificateParser
 from torscope.directory.client import DirectoryClient
@@ -28,7 +29,7 @@ from torscope.directory.extra_info import ExtraInfoParser
 from torscope.directory.fallback import get_fallbacks
 from torscope.directory.hs_descriptor import fetch_hs_descriptor, parse_hs_descriptor
 from torscope.directory.hsdir import HSDirectoryRing
-from torscope.directory.models import ConsensusDocument, RouterStatusEntry
+from torscope.directory.models import ConsensusDocument
 from torscope.microdesc import get_ntor_key
 from torscope.onion.address import OnionAddress, get_current_time_period, get_time_period_info
 from torscope.onion.circuit import Circuit
@@ -486,19 +487,19 @@ def cmd_path(args: argparse.Namespace) -> int:
         exit_router = None
 
         if args.guard:
-            guard = _find_router(consensus, args.guard.strip())
+            guard = find_router(consensus, args.guard.strip())
             if guard is None:
                 print(f"Guard router not found: {args.guard}", file=sys.stderr)
                 return 1
 
         if args.middle and num_hops >= 3:
-            middle = _find_router(consensus, args.middle.strip())
+            middle = find_router(consensus, args.middle.strip())
             if middle is None:
                 print(f"Middle router not found: {args.middle}", file=sys.stderr)
                 return 1
 
         if exit_spec and num_hops >= 2:
-            exit_router = _find_router(consensus, exit_spec.strip())
+            exit_router = find_router(consensus, exit_spec.strip())
             if exit_router is None:
                 print(f"Exit router not found: {exit_spec}", file=sys.stderr)
                 return 1
@@ -549,60 +550,6 @@ def cmd_path(args: argparse.Namespace) -> int:
         return 1
 
 
-def _find_router(consensus: ConsensusDocument, query: str) -> RouterStatusEntry | None:
-    """Find router by fingerprint or nickname."""
-    query_upper = query.upper()
-    for r in consensus.routers:
-        if r.fingerprint.startswith(query_upper):
-            return r
-        if r.nickname.upper() == query_upper:
-            return r
-    return None
-
-
-def _parse_address_port(addr_port: str) -> tuple[str, int]:
-    """Parse address:port string, handling IPv6 bracket notation.
-
-    Examples:
-        example.com:80 -> ("example.com", 80)
-        192.168.1.1:443 -> ("192.168.1.1", 443)
-        [::1]:8080 -> ("::1", 8080)
-        [2001:db8::1]:80 -> ("2001:db8::1", 80)
-
-    Raises:
-        ValueError: If format is invalid
-    """
-    if addr_port.startswith("["):
-        # IPv6 with brackets: [addr]:port
-        bracket_end = addr_port.find("]")
-        if bracket_end == -1:
-            raise ValueError(f"Invalid IPv6 address format: {addr_port}")
-        addr = addr_port[1:bracket_end]
-        rest = addr_port[bracket_end + 1 :]
-        if not rest.startswith(":"):
-            raise ValueError(f"Missing port after IPv6 address: {addr_port}")
-        try:
-            port = int(rest[1:])
-        except ValueError:
-            raise ValueError(f"Invalid port: {rest[1:]}") from None
-    else:
-        # IPv4 or hostname: addr:port
-        if ":" not in addr_port:
-            raise ValueError(f"Missing port in address: {addr_port}")
-        # Find the last colon (in case of bare IPv6 without brackets, though not recommended)
-        last_colon = addr_port.rfind(":")
-        addr = addr_port[:last_colon]
-        try:
-            port = int(addr_port[last_colon + 1 :])
-        except ValueError:
-            raise ValueError(f"Invalid port: {addr_port[last_colon + 1:]}") from None
-
-    if not 1 <= port <= 65535:
-        raise ValueError(f"Port out of range: {port}")
-
-    return addr, port
-
-
 def cmd_circuit(args: argparse.Namespace) -> int:
     """Build a Tor circuit (1-3 hops)."""
     try:
@@ -619,19 +566,19 @@ def cmd_circuit(args: argparse.Namespace) -> int:
         exit_router = None
 
         if args.guard:
-            guard = _find_router(consensus, args.guard.strip())
+            guard = find_router(consensus, args.guard.strip())
             if guard is None:
                 print(f"Guard router not found: {args.guard}", file=sys.stderr)
                 return 1
 
         if args.middle and num_hops >= 3:
-            middle = _find_router(consensus, args.middle.strip())
+            middle = find_router(consensus, args.middle.strip())
             if middle is None:
                 print(f"Middle router not found: {args.middle}", file=sys.stderr)
                 return 1
 
         if exit_spec and num_hops >= 2:
-            exit_router = _find_router(consensus, exit_spec.strip())
+            exit_router = find_router(consensus, exit_spec.strip())
             if exit_router is None:
                 print(f"Exit router not found: {exit_spec}", file=sys.stderr)
                 return 1
@@ -1029,7 +976,7 @@ def cmd_hidden_service(args: argparse.Namespace) -> int:
         if args.hsdir:
             # Manual HSDir selection
             output.verbose(f"Using manually specified HSDir: {args.hsdir}")
-            hsdir = _find_router(consensus, args.hsdir.strip())
+            hsdir = find_router(consensus, args.hsdir.strip())
             if hsdir is None:
                 print(f"HSDir not found: {args.hsdir}", file=sys.stderr)
                 return 1
@@ -1139,7 +1086,7 @@ def cmd_open_stream(args: argparse.Namespace) -> int:  # noqa: PLR0915
 
         # Parse address:port
         try:
-            target_addr, target_port = _parse_address_port(args.destination)
+            target_addr, target_port = parse_address_port(args.destination)
         except ValueError as e:
             print(f"Invalid destination format: {e}", file=sys.stderr)
             return 1
@@ -1177,19 +1124,19 @@ def _open_stream_clearnet(args: argparse.Namespace, target_addr: str, target_por
     exit_router = None
 
     if args.guard:
-        guard = _find_router(consensus, args.guard.strip())
+        guard = find_router(consensus, args.guard.strip())
         if guard is None:
             print(f"Guard router not found: {args.guard}", file=sys.stderr)
             return 1
 
     if args.middle and num_hops >= 3:
-        middle = _find_router(consensus, args.middle.strip())
+        middle = find_router(consensus, args.middle.strip())
         if middle is None:
             print(f"Middle router not found: {args.middle}", file=sys.stderr)
             return 1
 
     if exit_spec and num_hops >= 2:
-        exit_router = _find_router(consensus, exit_spec.strip())
+        exit_router = find_router(consensus, exit_spec.strip())
         if exit_router is None:
             print(f"Exit router not found: {exit_spec}", file=sys.stderr)
             return 1
@@ -1359,7 +1306,7 @@ def _open_stream_onion(args: argparse.Namespace, target_addr: str, target_port: 
     # Find responsible HSDirs (or use manually specified one)
     hsdir_arg = getattr(args, "hsdir", None)
     if hsdir_arg:
-        hsdir = _find_router(consensus, hsdir_arg.strip())
+        hsdir = find_router(consensus, hsdir_arg.strip())
         if hsdir is None:
             print(f"HSDir not found: {hsdir_arg}", file=sys.stderr)
             return 1
