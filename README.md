@@ -81,6 +81,11 @@ It implements the Tor directory protocol and OR (Onion Router) protocol, allowin
 
 ### Protocol Features
 - Pluggable transports: Snowflake
+- TRUNCATE/TRUNCATED cells (circuit truncation)
+- DROP cells (long-range dummy traffic)
+- VPADDING cells (variable-length link padding)
+- RTT-based congestion control (Proposal 324)
+- Proof-of-Work for hidden service DoS protection
 
 ### Other
 - REST API
@@ -95,6 +100,9 @@ It implements the Tor directory protocol and OR (Onion Router) protocol, allowin
 - XOFF/XON congestion control (sender-side mechanism, not needed for receiving)
 - Conflux (multi-path circuits, performance optimization)
 - AUTHENTICATE cell (relay-to-relay authentication, not needed for clients)
+- TAP handshake (obsolete RSA-based CREATE/CREATED)
+- Legacy EXTEND/EXTENDED (obsolete, using EXTEND2)
+- AUTHORIZE cell (reserved, not needed for clients)
 
 # Installation
 
