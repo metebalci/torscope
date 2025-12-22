@@ -44,6 +44,7 @@ It implements the Tor directory protocol and OR (Onion Router) protocol, allowin
 - Stream termination (RELAY_END)
 - DNS resolution (RELAY_RESOLVE/RESOLVED)
 - Directory streams (RELAY_BEGIN_DIR)
+- Flow control (SENDME cells) with authenticated SENDME v1
 
 ### Path Selection
 - Bandwidth-weighted random selection
@@ -79,8 +80,6 @@ It implements the Tor directory protocol and OR (Onion Router) protocol, allowin
 ## Not Implemented
 
 ### Protocol Features
-- Flow control (SENDME cells) - not needed for small transfers
-- XOFF/XON congestion control
 - Conflux (multi-path circuits)
 - AUTHENTICATE cell (relay authentication)
 - Pluggable transports: Snowflake
@@ -95,6 +94,7 @@ It implements the Tor directory protocol and OR (Onion Router) protocol, allowin
 - Connection pooling/reuse
 - Onion service publication (server-side)
 - Pluggable transports: meek
+- XOFF/XON congestion control (sender-side mechanism, not needed for receiving)
 
 # Installation
 

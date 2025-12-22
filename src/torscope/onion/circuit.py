@@ -26,8 +26,15 @@ from torscope.onion.cell import (
 from torscope.onion.connection import RelayConnection
 from torscope.onion.ntor import CircuitKeys, NtorClientState, node_id_from_fingerprint
 from torscope.onion.relay import (
+    CIRCUIT_SENDME_THRESHOLD,
+    CIRCUIT_WINDOW_INCREMENT,
+    CIRCUIT_WINDOW_INITIAL,
     RELAY_BODY_LEN,
     RELAY_DATA_LEN,
+    SENDME_VERSION_1,
+    STREAM_SENDME_THRESHOLD,
+    STREAM_WINDOW_INCREMENT,
+    STREAM_WINDOW_INITIAL,
     CircpadCommand,
     CircpadMachineType,
     LinkSpecifier,
@@ -42,6 +49,7 @@ from torscope.onion.relay import (
     create_extend2_payload,
     create_padding_negotiate_payload,
     create_resolve_payload,
+    create_sendme_payload,
     parse_extended2_payload,
     parse_padding_negotiated_payload,
     parse_resolved_payload,
@@ -56,6 +64,14 @@ class CircuitState(Enum):
     OPEN = auto()  # Ready for use
     CLOSED = auto()  # Torn down
     FAILED = auto()  # Creation failed
+
+
+@dataclass
+class StreamState:
+    """Flow control state for a stream."""
+
+    stream_id: int
+    deliver_window: int = STREAM_WINDOW_INITIAL  # Decrements on DATA received
 
 
 @dataclass
@@ -81,6 +97,15 @@ class Circuit:
     hops: list[CircuitHop] = field(default_factory=list)
     _crypto_layers: list[RelayCrypto] = field(default_factory=list, repr=False)
     _next_stream_id: int = field(default=1, repr=False)
+
+    # Flow control state (for receiving)
+    # See: https://spec.torproject.org/tor-spec/flow-control.html
+    _circuit_deliver_window: int = field(default=CIRCUIT_WINDOW_INITIAL, repr=False)
+    _streams: dict[int, StreamState] = field(default_factory=dict, repr=False)
+
+    # For authenticated SENDME v1: track the digest of the cell that will trigger SENDME
+    # This is captured when the window crosses the threshold boundary
+    _sendme_digest: bytes = field(default=b"", repr=False)
 
     @classmethod
     def create(cls, connection: RelayConnection) -> "Circuit":
@@ -570,9 +595,106 @@ class Circuit:
                     else:
                         cmd = result.relay_command.name
                         print(f"    [debug] Layer {i} decrypt_backward OK: {cmd}")
+
+                # Flow control: track windows and send SENDMEs for DATA cells
+                if result is not None and result.relay_command == RelayCommand.DATA:
+                    self._handle_data_flow_control(result, layer, debug)
+
                 return result
 
         return None
+
+    def _handle_data_flow_control(
+        self, data_cell: RelayCell, crypto_layer: RelayCrypto, debug: bool = False
+    ) -> None:
+        """Handle flow control when a DATA cell is received.
+
+        Decrements circuit and stream windows, captures digest for authenticated
+        SENDME, and sends SENDME cells when thresholds are reached.
+
+        Args:
+            data_cell: The received DATA relay cell
+            crypto_layer: The crypto layer (for digest capture)
+            debug: If True, print debug info
+        """
+        # Decrement circuit deliver window
+        self._circuit_deliver_window -= 1
+
+        if debug:
+            print(
+                f"    [debug] Circuit window: {self._circuit_deliver_window + 1} → "
+                f"{self._circuit_deliver_window}"
+            )
+
+        # Check if we need to capture digest for authenticated SENDME
+        # Capture when we cross from above threshold to at/below threshold
+        if self._circuit_deliver_window == CIRCUIT_SENDME_THRESHOLD:
+            # This cell triggered the SENDME - capture its digest
+            self._sendme_digest = crypto_layer.get_backward_digest()
+            if debug:
+                print(f"    [debug] Captured SENDME digest: {self._sendme_digest[:8].hex()}...")
+
+        # Check if we need to send circuit-level SENDME
+        if self._circuit_deliver_window <= CIRCUIT_SENDME_THRESHOLD:
+            self._send_circuit_sendme()
+            self._circuit_deliver_window += CIRCUIT_WINDOW_INCREMENT
+
+        # Handle stream-level flow control
+        stream_id = data_cell.stream_id
+        if stream_id > 0 and stream_id in self._streams:
+            stream = self._streams[stream_id]
+            stream.deliver_window -= 1
+
+            if debug:
+                print(
+                    f"    [debug] Stream {stream_id} window: {stream.deliver_window + 1} → "
+                    f"{stream.deliver_window}"
+                )
+
+            # Check if we need to send stream-level SENDME
+            if stream.deliver_window <= STREAM_SENDME_THRESHOLD:
+                self._send_stream_sendme(stream_id)
+                stream.deliver_window += STREAM_WINDOW_INCREMENT
+
+    def _send_circuit_sendme(self) -> None:
+        """Send circuit-level SENDME cell (stream_id=0).
+
+        Uses authenticated SENDME v1 with the digest captured when
+        the window crossed the threshold.
+        """
+        sendme_data = create_sendme_payload(
+            version=SENDME_VERSION_1,
+            digest=self._sendme_digest,
+        )
+        sendme = RelayCell(
+            relay_command=RelayCommand.SENDME,
+            stream_id=0,  # Circuit-level
+            data=sendme_data,
+        )
+        self.send_relay(sendme)
+        output.debug(
+            f"Sent circuit SENDME (window: {self._circuit_deliver_window} → "
+            f"{self._circuit_deliver_window + CIRCUIT_WINDOW_INCREMENT})"
+        )
+
+    def _send_stream_sendme(self, stream_id: int) -> None:
+        """Send stream-level SENDME cell.
+
+        Stream-level SENDMEs use v0 (no authentication required).
+        """
+        sendme_data = create_sendme_payload(version=0)  # Stream SENDMEs are v0
+        sendme = RelayCell(
+            relay_command=RelayCommand.SENDME,
+            stream_id=stream_id,
+            data=sendme_data,
+        )
+        self.send_relay(sendme)
+        stream = self._streams.get(stream_id)
+        if stream:
+            output.debug(
+                f"Sent stream SENDME for stream {stream_id} (window: {stream.deliver_window} → "
+                f"{stream.deliver_window + STREAM_WINDOW_INCREMENT})"
+            )
 
     def begin_stream(self, address: str, port: int) -> int | None:
         """
@@ -611,6 +733,8 @@ class Circuit:
 
         if response.relay_command == RelayCommand.CONNECTED:
             output.debug(f"Stream {stream_id} connected")
+            # Initialize stream flow control state
+            self._streams[stream_id] = StreamState(stream_id=stream_id)
             return stream_id
 
         if response.relay_command == RelayCommand.END:
@@ -654,6 +778,8 @@ class Circuit:
 
         if response.relay_command == RelayCommand.CONNECTED:
             output.debug(f"Directory stream {stream_id} connected")
+            # Initialize stream flow control state
+            self._streams[stream_id] = StreamState(stream_id=stream_id)
             return stream_id
 
         if response.relay_command == RelayCommand.END:
@@ -735,6 +861,8 @@ class Circuit:
             data=create_end_payload(reason),
         )
         self.send_relay(end_cell)
+        # Clean up stream flow control state
+        self._streams.pop(stream_id, None)
 
     def negotiate_padding(
         self,
@@ -833,36 +961,52 @@ class Circuit:
         Returns:
             Data bytes, or None if stream ended or error
         """
-        response = self.recv_relay(debug=debug)
-        if response is None:
+        while True:
+            response = self.recv_relay(debug=debug)
+            if response is None:
+                if debug:
+                    print("    [debug] recv_relay returned None")
+                return None
+
             if debug:
-                print("    [debug] recv_relay returned None")
-            return None
+                print(
+                    f"    [debug] Got relay cmd={response.relay_command.name} "
+                    f"stream={response.stream_id} len={len(response.data)}"
+                )
 
-        if debug:
-            print(
-                f"    [debug] Got relay cmd={response.relay_command.name} "
-                f"stream={response.stream_id} len={len(response.data)}"
-            )
+            # Handle incoming SENDME cells (from sender acknowledging our SENDMEs)
+            # These are flow control signals that don't carry data - skip them
+            if response.relay_command == RelayCommand.SENDME:
+                if debug:
+                    target = (
+                        "circuit" if response.stream_id == 0 else f"stream {response.stream_id}"
+                    )
+                    print(f"    [debug] Received SENDME for {target}")
+                # Continue to get the next cell
+                continue
 
-        if response.stream_id != stream_id:
-            # Data for different stream (shouldn't happen in single-stream use)
+            if response.stream_id != stream_id:
+                # Data for different stream (shouldn't happen in single-stream use)
+                if debug:
+                    print(
+                        f"    [debug] Wrong stream_id: got {response.stream_id}, want {stream_id}"
+                    )
+                return None
+
+            if response.relay_command == RelayCommand.DATA:
+                return response.data
+
+            if response.relay_command == RelayCommand.END:
+                if debug:
+                    print("    [debug] Stream ended (RELAY_END)")
+                # Clean up stream state
+                self._streams.pop(stream_id, None)
+                return None
+
+            # Unexpected command
             if debug:
-                print(f"    [debug] Wrong stream_id: got {response.stream_id}, want {stream_id}")
+                print(f"    [debug] Unexpected relay command: {response.relay_command.name}")
             return None
-
-        if response.relay_command == RelayCommand.DATA:
-            return response.data
-
-        if response.relay_command == RelayCommand.END:
-            if debug:
-                print("    [debug] Stream ended (RELAY_END)")
-            return None
-
-        # Unexpected command - could be SENDME, etc.
-        if debug:
-            print(f"    [debug] Unexpected relay command: {response.relay_command.name}")
-        return None
 
     def fetch_directory(self, path: str, timeout: float = 30.0) -> bytes | None:
         """

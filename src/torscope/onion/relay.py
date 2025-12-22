@@ -35,6 +35,25 @@ from cryptography.hazmat.primitives.ciphers import Cipher, CipherContext, algori
 # - Padding: Random padding to fill 509 bytes
 RELAY_BODY_LEN = 509
 
+# =============================================================================
+# Flow Control Constants
+# See: https://spec.torproject.org/tor-spec/flow-control.html
+# =============================================================================
+
+# Circuit-level flow control
+CIRCUIT_WINDOW_INITIAL = 1000  # Initial deliver window (cells)
+CIRCUIT_WINDOW_INCREMENT = 100  # SENDME increments window by this amount
+CIRCUIT_SENDME_THRESHOLD = 900  # Send SENDME when window drops to this
+
+# Stream-level flow control
+STREAM_WINDOW_INITIAL = 500  # Initial deliver window per stream (cells)
+STREAM_WINDOW_INCREMENT = 50  # SENDME increments window by this amount
+STREAM_SENDME_THRESHOLD = 450  # Send SENDME when window drops to this
+
+# SENDME version
+SENDME_VERSION_0 = 0  # Legacy: empty payload
+SENDME_VERSION_1 = 1  # Authenticated: includes digest
+
 # Relay header: Command(1) + Recognized(2) + StreamID(2) + Digest(4) + Length(2)
 RELAY_HEADER_LEN = 11
 
@@ -441,6 +460,21 @@ class RelayCrypto:
         if self._decryptor is None:
             raise RuntimeError("RelayCrypto not initialized")
         return self._decryptor.update(payload)
+
+    def get_backward_digest(self) -> bytes:
+        """
+        Get the current backward running digest (first 20 bytes).
+
+        Used for authenticated SENDME v1 - captures the digest state
+        at the time when a SENDME-triggering cell is received.
+
+        Returns:
+            First 20 bytes of the current running backward digest
+        """
+        if self._digest_backward_state is None:
+            raise RuntimeError("Backward digest not initialized")
+        # Copy the state to avoid affecting the running digest
+        return self._digest_backward_state.copy().digest()[:20]
 
 
 def create_begin_payload(address: str, port: int, flags: int = 0) -> bytes:
@@ -1030,3 +1064,83 @@ def parse_padding_negotiated_payload(payload: bytes) -> PaddingNegotiated:
         ValueError: If payload is too short or invalid
     """
     return PaddingNegotiated.unpack(payload)
+
+
+# =============================================================================
+# SENDME Flow Control
+# See: https://spec.torproject.org/tor-spec/flow-control.html
+# =============================================================================
+
+
+@dataclass
+class SendmeCell:
+    """
+    SENDME cell payload for flow control.
+
+    Version 0 (legacy): Empty payload
+    Version 1 (authenticated): VERSION(1) + DATA_LEN(2) + DIGEST(20)
+
+    The digest in v1 is the first 20 bytes of the cell digest that
+    triggered the SENDME (for authentication).
+    """
+
+    version: int = SENDME_VERSION_1
+    digest: bytes = b""  # 20 bytes for v1, empty for v0
+
+    def pack(self) -> bytes:
+        """Pack SENDME payload."""
+        if self.version == SENDME_VERSION_0:
+            return b""
+        if self.version == SENDME_VERSION_1:
+            # VERSION (1 byte) + DATA_LEN (2 bytes) + DIGEST (20 bytes)
+            digest_data = self.digest[:20].ljust(20, b"\x00")
+            return struct.pack(">BH", self.version, 20) + digest_data
+        raise ValueError(f"Unknown SENDME version: {self.version}")
+
+    @classmethod
+    def unpack(cls, payload: bytes) -> "SendmeCell":
+        """Unpack SENDME payload."""
+        if not payload:
+            # Version 0: empty payload
+            return cls(version=SENDME_VERSION_0, digest=b"")
+
+        if len(payload) < 3:
+            raise ValueError(f"SENDME payload too short: {len(payload)} < 3")
+
+        version, data_len = struct.unpack(">BH", payload[:3])
+
+        if version == SENDME_VERSION_1:
+            if data_len != 20:
+                raise ValueError(f"SENDME v1 data_len should be 20, got {data_len}")
+            if len(payload) < 3 + data_len:
+                raise ValueError(f"SENDME v1 payload truncated: {len(payload)} < {3 + data_len}")
+            digest = payload[3 : 3 + data_len]
+            return cls(version=version, digest=digest)
+
+        # Unknown version, return as-is
+        return cls(version=version, digest=payload[3:])
+
+
+def create_sendme_payload(version: int = SENDME_VERSION_1, digest: bytes = b"") -> bytes:
+    """Create SENDME cell payload.
+
+    Args:
+        version: SENDME version (0 for legacy, 1 for authenticated)
+        digest: For v1, the 20-byte digest of the triggering cell
+
+    Returns:
+        SENDME payload bytes
+    """
+    return SendmeCell(version=version, digest=digest).pack()
+
+
+def parse_sendme_payload(payload: bytes) -> SendmeCell:
+    """Parse SENDME cell payload.
+
+    Args:
+        payload: SENDME cell payload
+
+    Returns:
+        SendmeCell object
+    """
+    return SendmeCell.unpack(payload)
