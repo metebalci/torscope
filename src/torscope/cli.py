@@ -19,7 +19,14 @@ from torscope.cache import (
     load_consensus,
     save_consensus,
 )
-from torscope.cli_helpers import find_router, parse_address_port
+from torscope.cli_helpers import (
+    fetch_hs_descriptor_latest,
+    find_router,
+    parse_address_port,
+    print_decryption_error,
+    print_descriptor_info,
+    print_introduction_points,
+)
 from torscope.directory.authority import get_authorities
 from torscope.directory.bridge import BridgeParseError, parse_bridge_line
 from torscope.directory.certificates import KeyCertificateParser
@@ -994,12 +1001,23 @@ def cmd_hidden_service(args: argparse.Namespace) -> int:
         print(f"  Checksum: {onion.checksum.hex()}")
 
         # Time period info
-        output.explain("Computing current time period for descriptor lookup")
-        time_period = get_current_time_period()
+        output.explain("Computing time period for descriptor lookup")
+        current_period = get_current_time_period()
         period_info = get_time_period_info()
-        output.verbose(f"Time period: {time_period}")
-        output.debug(f"Remaining: {period_info['remaining_minutes']:.1f} minutes")
-        print(f"\nTime Period: {time_period}")
+
+        # Use specified period or default to current
+        if getattr(args, "time_period", None) is not None:
+            time_period = args.time_period
+            period_offset = time_period - current_period
+            output.verbose(f"Using time period: {time_period} (offset: {period_offset:+d})")
+            print(f"\nTime Period: {time_period} (offset: {period_offset:+d} from current)")
+        else:
+            time_period = current_period
+            output.verbose(f"Time period: {time_period}")
+            print(f"\nTime Period: {time_period}")
+
+        output.debug(f"Remaining in current period: {period_info['remaining_minutes']:.1f} minutes")
+        print(f"  Current period: {current_period}")
         print(f"  Remaining: {period_info['remaining_minutes']:.1f} minutes")
 
         # Get consensus for HSDir selection
@@ -1110,43 +1128,61 @@ def cmd_hidden_service(args: argparse.Namespace) -> int:
                 output.debug(f"HSDir {i+1}: {hsdir.nickname} ({hsdir.fingerprint[:16]}...)")
                 print(f"  [{i+1}] {hsdir.nickname} ({hsdir.ip}:{hsdir.orport})")
 
-        # Fetch descriptor from HSDirs (try first 6)
+        # Fetch descriptor from HSDirs
         output.explain("Fetching hidden service descriptor from HSDir")
-        for hsdir in hsdirs[:6]:
-            output.verbose(f"Trying HSDir: {hsdir.nickname}")
-            print(f"\nFetching descriptor from {hsdir.nickname}...")
-            try:
-                result = fetch_hs_descriptor(
-                    consensus=consensus,
-                    hsdir=hsdir,
-                    blinded_key=blinded_key,
-                    timeout=get_timeout(),
-                    verbose=output.is_verbose() or output.is_debug(),
-                )
-                if result:
-                    descriptor_text, hsdir_used = result
-                    print(f"  Descriptor fetched from {hsdir_used.nickname}")
-                    break
-                print(f"  Failed to fetch from {hsdir.nickname}")
-            except (
-                ConnectionError,
-                OSError,
-                TimeoutError,
-                httpx.ConnectError,
-                httpx.TimeoutException,
-                httpx.NetworkError,
-            ) as e:
-                # Connection errors - retry with next HSDir
-                if output.is_debug():
-                    output.debug(f"Connection error: {e}")
-                else:
-                    print(f"  Failed to connect to {hsdir.nickname}, trying next...")
-            except Exception as e:  # pylint: disable=broad-exception-caught
-                # Other errors - log and retry
-                if output.is_debug():
-                    traceback.print_exc()
-                else:
-                    print(f"  Failed: {type(e).__name__}, trying next...")
+        descriptor_text = None
+        hsdir_used = None
+
+        if getattr(args, "all_hsdirs", False):
+            # Query all HSDirs and pick highest revision
+            print("\nQuerying all HSDirs for latest revision...")
+            result = fetch_hs_descriptor_latest(
+                consensus=consensus,
+                hsdirs=hsdirs,
+                blinded_key=blinded_key,
+                timeout=get_timeout(),
+                verbose=True,
+            )
+            if result:
+                descriptor_text, hsdir_used = result
+                print(f"\nUsing descriptor from {hsdir_used.nickname}")
+        else:
+            # Standard: try HSDirs in order until one succeeds
+            for hsdir in hsdirs[:6]:
+                output.verbose(f"Trying HSDir: {hsdir.nickname}")
+                print(f"\nFetching descriptor from {hsdir.nickname}...")
+                try:
+                    result = fetch_hs_descriptor(
+                        consensus=consensus,
+                        hsdir=hsdir,
+                        blinded_key=blinded_key,
+                        timeout=get_timeout(),
+                        verbose=output.is_verbose() or output.is_debug(),
+                    )
+                    if result:
+                        descriptor_text, hsdir_used = result
+                        print(f"  Descriptor fetched from {hsdir_used.nickname}")
+                        break
+                    print(f"  Failed to fetch from {hsdir.nickname}")
+                except (
+                    ConnectionError,
+                    OSError,
+                    TimeoutError,
+                    httpx.ConnectError,
+                    httpx.TimeoutException,
+                    httpx.NetworkError,
+                ) as e:
+                    # Connection errors - retry with next HSDir
+                    if output.is_debug():
+                        output.debug(f"Connection error: {e}")
+                    else:
+                        print(f"  Failed to connect to {hsdir.nickname}, trying next...")
+                except Exception as e:  # pylint: disable=broad-exception-caught
+                    # Other errors - log and retry
+                    if output.is_debug():
+                        traceback.print_exc()
+                    else:
+                        print(f"  Failed: {type(e).__name__}, trying next...")
 
         if descriptor_text is None:
             print("\nFailed to fetch descriptor from any HSDir", file=sys.stderr)
@@ -1168,27 +1204,12 @@ def cmd_hidden_service(args: argparse.Namespace) -> int:
         output.debug(f"Revision counter: {descriptor.outer.revision_counter}")
 
         # Display descriptor info
-        print("\nDescriptor Info:")
-        print(f"  Version: {descriptor.outer.version}")
-        print(f"  Lifetime: {descriptor.outer.descriptor_lifetime} minutes")
-        print(f"  Revision: {descriptor.outer.revision_counter}")
-        print(f"  Signing cert: {len(descriptor.outer.signing_key_cert)} bytes")
-        print(f"  Superencrypted: {len(descriptor.outer.superencrypted_blob)} bytes")
-        print(f"  Signature: {len(descriptor.outer.signature)} bytes")
+        print_descriptor_info(descriptor)
 
         if descriptor.decrypted:
-            print(f"\nIntroduction Points ({len(descriptor.introduction_points)}):")
-            for i, ip in enumerate(descriptor.introduction_points):
-                ip_addr = ip.ip_address or "unknown"
-                port = ip.port or 0
-                fp = ip.fingerprint or "unknown"
-                print(f"  [{i+1}] {ip_addr}:{port} (fp: {fp[:16]}...)")
-                if ip.onion_key_ntor:
-                    print(f"      onion-key: {len(ip.onion_key_ntor)} bytes")
-                if ip.enc_key:
-                    print(f"      enc-key: {len(ip.enc_key)} bytes")
+            print_introduction_points(descriptor.introduction_points)
         else:
-            print(f"\n[Descriptor decryption failed: {descriptor.decryption_error}]")
+            print_decryption_error(descriptor.decryption_error, file=sys.stdout)
 
         return 0
 
@@ -1408,8 +1429,16 @@ def _open_stream_onion(args: argparse.Namespace, target_addr: str, target_port: 
     consensus = get_consensus()
 
     # Time period info
-    time_period = get_current_time_period()
+    current_period = get_current_time_period()
     period_info = get_time_period_info()
+
+    # Use specified period or default to current
+    if getattr(args, "time_period", None) is not None:
+        time_period = args.time_period
+        period_offset = time_period - current_period
+        print(f"\nTime Period: {time_period} (offset: {period_offset:+d})", file=sys.stderr)
+    else:
+        time_period = current_period
 
     # Pre-fetch Ed25519 identities for HSDir relays
     print("\nFetching HSDir Ed25519 identities...", file=sys.stderr)
@@ -1430,6 +1459,13 @@ def _open_stream_onion(args: argparse.Namespace, target_addr: str, target_port: 
     # Compute blinded key and subcredential
     blinded_key = onion.compute_blinded_key(time_period)
     subcredential = onion.compute_subcredential(time_period)
+
+    # Print time period info (only if not already printed for specified period)
+    if getattr(args, "time_period", None) is None:
+        print(f"\nTime Period: {time_period}", file=sys.stderr)
+    remaining = period_info["remaining_minutes"]
+    print(f"  Current: {current_period}, Remaining: {remaining:.1f} min", file=sys.stderr)
+    print(f"\nBlinded Key: {blinded_key.hex()[:32]}...", file=sys.stderr)
 
     # Determine which SRV to use
     hours_into_period = 24 - (period_info["remaining_minutes"] / 60)
@@ -1461,32 +1497,49 @@ def _open_stream_onion(args: argparse.Namespace, target_addr: str, target_port: 
 
     # Fetch descriptor
     descriptor_text = None
-    for hsdir in hsdirs[:6]:
-        print(f"\nFetching descriptor from {hsdir.nickname}...", file=sys.stderr)
-        try:
-            result = fetch_hs_descriptor(
-                consensus=consensus,
-                hsdir=hsdir,
-                blinded_key=blinded_key,
-                timeout=get_timeout(),
-                use_3hop_circuit=True,
-                verbose=output.is_verbose() or output.is_debug(),
-            )
-            if result:
-                descriptor_text, hsdir_used = result
-                print(f"  Descriptor fetched from {hsdir_used.nickname}", file=sys.stderr)
-                break
-            print(f"  Failed to fetch from {hsdir.nickname}", file=sys.stderr)
-        except (ConnectionError, OSError, TimeoutError, httpx.HTTPError) as e:
-            if output.is_debug():
-                output.debug(f"Connection error: {e}")
-            else:
-                print(f"  Failed to connect to {hsdir.nickname}, trying next...", file=sys.stderr)
-        except Exception as e:  # pylint: disable=broad-exception-caught
-            if output.is_debug():
-                traceback.print_exc()
-            else:
-                print(f"  Failed: {type(e).__name__}, trying next...", file=sys.stderr)
+    hsdir_used = None
+
+    if getattr(args, "all_hsdirs", False):
+        # Query all HSDirs and pick highest revision
+        print("\nQuerying all HSDirs for latest revision...", file=sys.stderr)
+        result = fetch_hs_descriptor_latest(
+            consensus=consensus,
+            hsdirs=hsdirs,
+            blinded_key=blinded_key,
+            timeout=get_timeout(),
+            verbose=True,
+        )
+        if result:
+            descriptor_text, hsdir_used = result
+            print(f"\nUsing descriptor from {hsdir_used.nickname}", file=sys.stderr)
+    else:
+        # Standard: try HSDirs in order until one succeeds
+        for hsdir in hsdirs[:6]:
+            print(f"\nFetching descriptor from {hsdir.nickname}...", file=sys.stderr)
+            try:
+                result = fetch_hs_descriptor(
+                    consensus=consensus,
+                    hsdir=hsdir,
+                    blinded_key=blinded_key,
+                    timeout=get_timeout(),
+                    use_3hop_circuit=True,
+                    verbose=output.is_verbose() or output.is_debug(),
+                )
+                if result:
+                    descriptor_text, hsdir_used = result
+                    print(f"  Descriptor fetched from {hsdir_used.nickname}", file=sys.stderr)
+                    break
+                print(f"  Failed to fetch from {hsdir.nickname}", file=sys.stderr)
+            except (ConnectionError, OSError, TimeoutError, httpx.HTTPError) as e:
+                if output.is_debug():
+                    output.debug(f"Connection error: {e}")
+                else:
+                    print(f"  Failed: {hsdir.nickname}, trying next...", file=sys.stderr)
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                if output.is_debug():
+                    traceback.print_exc()
+                else:
+                    print(f"  Failed: {type(e).__name__}, trying next...", file=sys.stderr)
 
     if descriptor_text is None:
         print("\nFailed to fetch descriptor from any HSDir", file=sys.stderr)
@@ -1501,23 +1554,15 @@ def _open_stream_onion(args: argparse.Namespace, target_addr: str, target_port: 
         print(f"\nFailed to parse descriptor: {e}", file=sys.stderr)
         return 1
 
+    # Display descriptor info
+    print_descriptor_info(descriptor, file=sys.stderr)
+
     if not descriptor.decrypted or not descriptor.introduction_points:
         error = descriptor.decryption_error or "no introduction points"
-        if client_privkey is None and "auth" in (error or "").lower():
-            print(
-                f"\nCannot connect: {error}",
-                file=sys.stderr,
-            )
-            print(
-                "Hint: This may be a private hidden service. "
-                "Use --auth-key-file to provide authorization.",
-                file=sys.stderr,
-            )
-        else:
-            print(f"\nCannot connect: {error}", file=sys.stderr)
+        print_decryption_error(error)
         return 1
 
-    print(f"\nFound {len(descriptor.introduction_points)} introduction points", file=sys.stderr)
+    print_introduction_points(descriptor.introduction_points, file=sys.stderr)
 
     # Perform rendezvous
     try:
@@ -1726,6 +1771,18 @@ def main() -> int:
     )
     hs_parser.add_argument("--auth-key", metavar="KEY", help="Client auth key (for testing)")
     hs_parser.add_argument("--hsdir", metavar="FINGERPRINT", help="Manually specify HSDir to use")
+    hs_parser.add_argument(
+        "--all-hsdirs",
+        action="store_true",
+        help="Query all HSDirs and use descriptor with highest revision",
+    )
+    hs_parser.add_argument(
+        "--time-period",
+        type=int,
+        default=None,
+        metavar="NUM",
+        help="Absolute time period number (default: current)",
+    )
 
     # select-path command
     path_parser = subparsers.add_parser(
@@ -1794,6 +1851,18 @@ def main() -> int:
         "--bridge",
         metavar="'IP:PORT FP'",
         help="Bridge relay to use as first hop (format: 'IP:PORT FINGERPRINT')",
+    )
+    stream_parser.add_argument(
+        "--all-hsdirs",
+        action="store_true",
+        help="Query all HSDirs and use descriptor with highest revision (onion only)",
+    )
+    stream_parser.add_argument(
+        "--time-period",
+        type=int,
+        default=None,
+        metavar="NUM",
+        help="Absolute time period number (onion only, default: current)",
     )
 
     # resolve command

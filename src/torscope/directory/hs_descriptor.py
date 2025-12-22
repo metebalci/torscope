@@ -769,23 +769,33 @@ def decrypt_descriptor(
     # Parse first layer to get the encrypted blob and text
     encrypted_blob, first_layer_text = _parse_first_layer(first_layer_plaintext)
 
+    # Try to decrypt the inner layer.
+    # All v3 descriptors have auth fields (for privacy), but public services
+    # use random entries that don't correspond to real keys.
+    # Strategy: try public decryption first, fall back to client auth if it fails.
+
+    from torscope.directory.client_auth import get_descriptor_cookie
+
     # If client_privkey provided, try to derive descriptor_cookie
     if client_privkey is not None and descriptor_cookie is None:
-        from torscope.directory.client_auth import get_descriptor_cookie
-
-        # get_descriptor_cookie returns the cookie if we're an authorized client,
-        # or None if no auth entries exist or our key doesn't match any.
-        # If None, we fall back to public decryption (no cookie).
         descriptor_cookie = get_descriptor_cookie(
             first_layer_text=first_layer_text,
             client_privkey=client_privkey,
             subcredential=subcredential,
         )
 
-    # Decrypt inner layer
-    second_layer_plaintext = decrypt_inner_layer(
-        encrypted_blob, blinded_key, subcredential, revision_counter, descriptor_cookie
-    )
+    # Try decryption - first without cookie (public), then with cookie if provided
+    try:
+        second_layer_plaintext = decrypt_inner_layer(
+            encrypted_blob, blinded_key, subcredential, revision_counter, descriptor_cookie
+        )
+    except ValueError as e:
+        if "MAC verification failed" in str(e):
+            # Decryption failed - might need client authorization
+            if client_privkey is None:
+                raise ValueError("Client authorization required") from e
+            raise ValueError("Client key not authorized for this service") from e
+        raise
 
     # Parse introduction points
     return _parse_introduction_points(second_layer_plaintext)
