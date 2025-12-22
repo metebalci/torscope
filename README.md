@@ -80,7 +80,6 @@ It implements the Tor directory protocol and OR (Onion Router) protocol, allowin
 ## Not Implemented
 
 ### Protocol Features
-- AUTHENTICATE cell (relay authentication)
 - Pluggable transports: Snowflake
 
 ### Other
@@ -95,6 +94,7 @@ It implements the Tor directory protocol and OR (Onion Router) protocol, allowin
 - Pluggable transports: meek
 - XOFF/XON congestion control (sender-side mechanism, not needed for receiving)
 - Conflux (multi-path circuits, performance optimization)
+- AUTHENTICATE cell (relay-to-relay authentication, not needed for clients)
 
 # Installation
 
