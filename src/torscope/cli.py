@@ -1132,7 +1132,7 @@ def cmd_hidden_service(args: argparse.Namespace) -> int:
         return 1
 
 
-def cmd_connect(args: argparse.Namespace) -> int:  # noqa: PLR0915
+def cmd_open_stream(args: argparse.Namespace) -> int:  # noqa: PLR0915
     """Connect to a destination through Tor (clearnet or .onion)."""
     try:
         output.explain("Connecting to destination through Tor network")
@@ -1151,9 +1151,9 @@ def cmd_connect(args: argparse.Namespace) -> int:  # noqa: PLR0915
 
         if is_onion:
             output.explain("Detected .onion address, using hidden service protocol")
-            return _connect_onion(args, target_addr, target_port)
+            return _open_stream_onion(args, target_addr, target_port)
         output.explain("Connecting to clearnet destination through exit relay")
-        return _connect_clearnet(args, target_addr, target_port)
+        return _open_stream_clearnet(args, target_addr, target_port)
 
     # pylint: disable-next=broad-exception-caught
     except Exception as e:
@@ -1162,7 +1162,7 @@ def cmd_connect(args: argparse.Namespace) -> int:  # noqa: PLR0915
         return 1
 
 
-def _connect_clearnet(args: argparse.Namespace, target_addr: str, target_port: int) -> int:
+def _open_stream_clearnet(args: argparse.Namespace, target_addr: str, target_port: int) -> int:
     """Connect to a clearnet destination through Tor."""
     output.explain("Building circuit to connect to clearnet destination")
     consensus = get_consensus()
@@ -1305,7 +1305,7 @@ def _connect_clearnet(args: argparse.Namespace, target_addr: str, target_port: i
         conn.close()
 
 
-def _connect_onion(args: argparse.Namespace, target_addr: str, target_port: int) -> int:
+def _open_stream_onion(args: argparse.Namespace, target_addr: str, target_port: int) -> int:
     """Connect to an onion service through Tor."""
     # Parse the onion address
     try:
@@ -1557,7 +1557,7 @@ def main() -> int:
     """Main entry point for the torscope CLI."""
     parser = argparse.ArgumentParser(
         prog="torscope",
-        description="Tor Network Information Tool",
+        description="Tor Network Exploration Tool",
         formatter_class=_SubcommandHelpFormatter,
     )
 
@@ -1644,41 +1644,41 @@ def main() -> int:
         "--port", type=int, metavar="PORT", help="Target port (filters exits)"
     )
 
-    # resolve command
-    resolve_parser = subparsers.add_parser(
-        "resolve", help="Resolve hostname through Tor network (DNS)"
+    # open-stream command
+    stream_parser = subparsers.add_parser(
+        "open-stream", help="Open a stream to a destination through Tor (clearnet or .onion)"
     )
-    resolve_parser.add_argument("hostname", metavar="HOSTNAME", help="Hostname to resolve")
-
-    # connect command
-    connect_parser = subparsers.add_parser(
-        "connect", help="Connect to a destination through Tor (clearnet or .onion)"
-    )
-    connect_parser.add_argument(
+    stream_parser.add_argument(
         "destination",
         metavar="ADDR:PORT",
         help="Destination address:port (use [ipv6]:port for IPv6)",
     )
-    connect_parser.add_argument(
+    stream_parser.add_argument(
         "--file", metavar="FILE", help="File containing request to send (use - for stdin)"
     )
-    connect_parser.add_argument(
+    stream_parser.add_argument(
         "--http-get",
         nargs="?",
         const="/",
         metavar="PATH",
         help="Send HTTP GET request (default path: /)",
     )
-    connect_parser.add_argument(
+    stream_parser.add_argument(
         "--hops", type=int, choices=[1, 2, 3], default=3, help="Number of hops (default: 3)"
     )
-    connect_parser.add_argument("--guard", metavar="ROUTER", help="Guard router (clearnet only)")
-    connect_parser.add_argument("--middle", metavar="ROUTER", help="Middle router (clearnet only)")
-    connect_parser.add_argument("--exit", metavar="ROUTER", help="Exit router (clearnet only)")
-    connect_parser.add_argument("--hsdir", metavar="FINGERPRINT", help="HSDir to use (onion only)")
-    connect_parser.add_argument(
+    stream_parser.add_argument("--guard", metavar="ROUTER", help="Guard router (clearnet only)")
+    stream_parser.add_argument("--middle", metavar="ROUTER", help="Middle router (clearnet only)")
+    stream_parser.add_argument("--exit", metavar="ROUTER", help="Exit router (clearnet only)")
+    stream_parser.add_argument("--hsdir", metavar="FINGERPRINT", help="HSDir to use (onion only)")
+    stream_parser.add_argument(
         "--auth-key", metavar="BASE64", help="Client authorization key (onion only)"
     )
+
+    # resolve command
+    resolve_parser = subparsers.add_parser(
+        "resolve", help="Resolve hostname through Tor network (DNS)"
+    )
+    resolve_parser.add_argument("hostname", metavar="HOSTNAME", help="Hostname to resolve")
 
     args = parser.parse_args()
 
@@ -1708,7 +1708,7 @@ def main() -> int:
         "build-circuit": cmd_circuit,
         "resolve": cmd_resolve,
         "hidden-service": cmd_hidden_service,
-        "connect": cmd_connect,
+        "open-stream": cmd_open_stream,
     }
 
     try:
