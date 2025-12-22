@@ -15,6 +15,7 @@ import random
 from dataclasses import dataclass, field
 from typing import Literal
 
+from torscope import output
 from torscope.directory.models import ConsensusDocument, Microdescriptor, RouterStatusEntry
 
 # Default weight scale (from bwweightscale consensus parameter)
@@ -120,6 +121,8 @@ class PathSelector:
         if num_hops < 1 or num_hops > 3:
             raise ValueError("num_hops must be 1, 2, or 3")
 
+        output.debug(f"Selecting {num_hops}-hop path, target_port={target_port}")
+
         excluded_fps: set[str] = set()
         excluded_subnets: set[str] = set()
         excluded_families: set[str] = set()
@@ -132,6 +135,9 @@ class PathSelector:
                 excluded_subnets=excluded_subnets,
                 excluded_families=excluded_families,
             )
+            output.verbose(f"Selected guard: {guard.nickname}")
+        else:
+            output.verbose(f"Using specified guard: {guard.nickname}")
         self._add_exclusions(guard, excluded_fps, excluded_subnets, excluded_families)
 
         if num_hops == 1:
@@ -146,6 +152,9 @@ class PathSelector:
                 excluded_families=excluded_families,
                 target_port=target_port,
             )
+            output.verbose(f"Selected exit: {exit_router.nickname}")
+        else:
+            output.verbose(f"Using specified exit: {exit_router.nickname}")
         self._add_exclusions(exit_router, excluded_fps, excluded_subnets, excluded_families)
 
         if num_hops == 2:
@@ -159,6 +168,9 @@ class PathSelector:
                 excluded_subnets=excluded_subnets,
                 excluded_families=excluded_families,
             )
+            output.verbose(f"Selected middle: {middle.nickname}")
+        else:
+            output.verbose(f"Using specified middle: {middle.nickname}")
 
         return PathSelectionResult(guard=guard, middle=middle, exit=exit_router)
 
@@ -193,8 +205,12 @@ class PathSelector:
         if not candidates:
             raise ValueError(f"No suitable {role} router found")
 
+        output.debug(f"Found {len(candidates)} candidates for {role}")
+
         # Get bandwidth weights for this role
         weights = self._compute_weights(candidates, role)
+        total_weight = sum(weights)
+        output.debug(f"Total bandwidth weight: {total_weight:,.0f}")
 
         # Weighted random selection
         return self._weighted_choice(candidates, weights)

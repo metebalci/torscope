@@ -193,6 +193,39 @@ class CircuitKeys:
         )
 
 
+@dataclass
+class HsCircuitKeys:
+    """Keys derived from hs-ntor handshake for a hidden service hop.
+
+    Hidden service hops use:
+    - SHA3-256 (32 bytes) for digests instead of SHA-1 (20 bytes)
+    - AES-256 (32 bytes) for keys instead of AES-128 (16 bytes)
+    See: https://spec.torproject.org/rend-spec/introduction-protocol.html#NTOR-WITH-EXTRA-DATA
+    """
+
+    digest_forward: bytes  # 32 bytes - SHA3-256 digest seed for forward cells
+    digest_backward: bytes  # 32 bytes - SHA3-256 digest seed for backward cells
+    key_forward: bytes  # 32 bytes - AES-256 key for encrypting forward cells
+    key_backward: bytes  # 32 bytes - AES-256 key for decrypting backward cells
+
+    @classmethod
+    def from_key_material(cls, key_material: bytes) -> "HsCircuitKeys":
+        """
+        Create HsCircuitKeys from 128 bytes of key material.
+
+        Layout: Df (32) | Db (32) | Kf (32) | Kb (32)
+        """
+        if len(key_material) != 128:
+            raise ValueError("key_material must be 128 bytes for HS circuits")
+
+        return cls(
+            digest_forward=key_material[0:32],
+            digest_backward=key_material[32:64],
+            key_forward=key_material[64:96],
+            key_backward=key_material[96:128],
+        )
+
+
 def node_id_from_rsa_identity(identity_key_der: bytes) -> bytes:
     """
     Compute node ID (20-byte SHA1) from RSA identity key.

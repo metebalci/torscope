@@ -1451,16 +1451,15 @@ def _send_and_receive(
     args: argparse.Namespace, circuit: Circuit, stream_id: int, target_addr: str
 ) -> int:
     """Send data and receive response on a stream."""
-    http_get = getattr(args, "http_get", False)
+    http_get_path: str | None = getattr(args, "http_get", None)
     request_file: str | None = getattr(args, "file", None)
 
-    if request_file or http_get:
-        if http_get:
+    if request_file or http_get_path:
+        if http_get_path:
             request_bytes = (
-                f"GET / HTTP/1.1\r\nHost: {target_addr}\r\nConnection: close\r\n\r\n".encode(
-                    "ascii"
-                )
-            )
+                f"GET {http_get_path} HTTP/1.1\r\n"
+                f"Host: {target_addr}\r\nConnection: close\r\n\r\n"
+            ).encode("ascii")
         elif request_file == "-":
             # Read from stdin
             request_bytes = sys.stdin.buffer.read()
@@ -1484,11 +1483,39 @@ def _send_and_receive(
         if response_data:
             print(f"\n  Response ({len(response_data)} bytes):")
             print("  " + "-" * 50)
-            response_text = response_data[:2000].decode("utf-8", errors="replace")
-            for line in response_text.split("\n"):
+
+            # Split headers and body
+            raw_text = response_data.decode("utf-8", errors="replace")
+            if "\r\n\r\n" in raw_text:
+                headers_part, body_part = raw_text.split("\r\n\r\n", 1)
+            elif "\n\n" in raw_text:
+                headers_part, body_part = raw_text.split("\n\n", 1)
+            else:
+                headers_part, body_part = raw_text, ""
+
+            # Check Content-Type header
+            is_text = False
+            for line in headers_part.split("\n"):
+                if line.lower().startswith("content-type:"):
+                    content_type = line.split(":", 1)[1].strip().lower()
+                    is_text = content_type.startswith("text/")
+                    break
+
+            # Print headers
+            headers_clean = headers_part.rstrip().replace("\r\n", "\n").replace("\r", "\n")
+            for line in headers_clean.split("\n"):
                 print(f"  {line}")
-            if len(response_data) > 2000:
-                print("  ...")
+
+            # Print body or binary indicator
+            if body_part:
+                print()  # Blank line after headers
+                if is_text:
+                    body_clean = body_part.rstrip().replace("\r\n", "\n").replace("\r", "\n")
+                    for line in body_clean.split("\n"):
+                        print(f"  {line}")
+                else:
+                    print(f"  <binary data, {len(body_part)} bytes>")
+
             print("  " + "-" * 50)
         else:
             print("  No response data received")
@@ -1635,7 +1662,13 @@ def main() -> int:
     connect_parser.add_argument(
         "--file", metavar="FILE", help="File containing request to send (use - for stdin)"
     )
-    connect_parser.add_argument("--http-get", action="store_true", help="Send HTTP GET request")
+    connect_parser.add_argument(
+        "--http-get",
+        nargs="?",
+        const="/",
+        metavar="PATH",
+        help="Send HTTP GET request (default path: /)",
+    )
     connect_parser.add_argument(
         "--hops", type=int, choices=[1, 2, 3], default=3, help="Number of hops (default: 3)"
     )

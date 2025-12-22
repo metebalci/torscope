@@ -160,18 +160,14 @@ class HsNtorClientState:
             mac_key=keys[S_KEY_LEN:],
         )
 
-    def encrypt_introduce_data(self, plaintext: bytes, auth_key: bytes) -> tuple[bytes, bytes]:
+    def encrypt_introduce_data(self, plaintext: bytes) -> bytes:
         """Encrypt data for INTRODUCE1 cell.
-
-        The MAC covers AUTH_KEY_TYPE || AUTH_KEY_LEN || AUTH_KEY || N_EXTENSIONS ||
-        CLIENT_PK || ENCRYPTED_DATA per the spec.
 
         Args:
             plaintext: Data to encrypt (rendezvous cookie, link specs, etc.)
-            auth_key: The 32-byte Ed25519 auth key (needed for MAC)
 
         Returns:
-            Tuple of (ciphertext, mac)
+            Ciphertext (same length as plaintext)
         """
         keys = self.get_introduce_keys()
 
@@ -182,21 +178,22 @@ class HsNtorClientState:
         # Encrypt with AES-256-CTR
         cipher = Cipher(algorithms.AES(keys.enc_key), modes.CTR(iv))
         encryptor = cipher.encryptor()
-        ciphertext = encryptor.update(plaintext) + encryptor.finalize()
+        return encryptor.update(plaintext) + encryptor.finalize()
 
-        # Build data for MAC: AUTH_KEY_TYPE || AUTH_KEY_LEN || AUTH_KEY ||
-        # N_EXTENSIONS || CLIENT_PK || ENCRYPTED_DATA
-        mac_data = bytearray()
-        mac_data.append(0x02)  # AUTH_KEY_TYPE = Ed25519
-        mac_data.extend(struct.pack(">H", len(auth_key)))  # AUTH_KEY_LEN
-        mac_data.extend(auth_key)  # AUTH_KEY
-        mac_data.append(0)  # N_EXTENSIONS = 0
-        mac_data.extend(self.client_pubkey)  # CLIENT_PK
-        mac_data.extend(ciphertext)  # ENCRYPTED_DATA
+    def compute_introduce_mac(self, cell_without_mac: bytes) -> bytes:
+        """Compute MAC for INTRODUCE1 cell.
 
-        mac = hs_ntor_mac(keys.mac_key, bytes(mac_data))
+        Per Tor's hs_cell.c compute_introduce_mac(), the MAC covers the
+        entire cell up to (but not including) the MAC field itself.
 
-        return ciphertext, mac
+        Args:
+            cell_without_mac: The entire INTRODUCE1 cell payload without the MAC
+
+        Returns:
+            32-byte MAC
+        """
+        keys = self.get_introduce_keys()
+        return hs_ntor_mac(keys.mac_key, cell_without_mac)
 
     def complete_rendezvous(self, server_pk_bytes: bytes, auth: bytes) -> bytes | None:
         """Complete the handshake using RENDEZVOUS2 response.
@@ -263,11 +260,14 @@ class HsNtorClientState:
             return None
 
         # Derive circuit keys
-        # K = KDF(NTOR_KEY_SEED | m_hsexpand, HASH_LEN * 2 + S_KEY_LEN * 2)
-        # For hs-ntor, we use SHA3-256 (32 bytes) for digests and AES-256 (32 bytes) for keys
-        # But Tor's relay crypto uses SHA-1 (20 bytes) for digests and AES-128 (16 bytes)
-        # So we derive: Df (20) | Db (20) | Kf (16) | Kb (16) = 72 bytes
-        key_material = hs_ntor_kdf(ntor_key_seed, M_HSEXPAND, 72)
+        # K = KDF(NTOR_KEY_SEED | m_hsexpand, SHA3_256_LEN * 2 + S_KEY_LEN * 2)
+        # For hs-ntor / hidden service hops:
+        # - Digest uses SHA3-256 (32 bytes each for Df/Db)
+        # - Encryption uses AES-256 (32 bytes each for Kf/Kb)
+        # Total: Df (32) | Db (32) | Kf (32) | Kb (32) = 128 bytes
+        # See: https://spec.torproject.org/rend-spec/introduction-protocol.html#NTOR-WITH-EXTRA-DATA
+        # "instead of using AES-128 and SHA1 for this hop, we use AES-256 and SHA3-256"
+        key_material = hs_ntor_kdf(ntor_key_seed, M_HSEXPAND, 128)
 
         return key_material
 
@@ -330,6 +330,13 @@ def create_introduce1_encrypted_payload(
         payload.append(lstype)
         payload.append(len(lspec))
         payload.extend(lspec)
+
+    # Pad the plaintext to a consistent size
+    # The spec says to pad so INTRODUCE2 is a fixed size (246 or 490 bytes)
+    # We'll pad the plaintext to 246 bytes to match current Tor implementations
+    target_size = 246
+    if len(payload) < target_size:
+        payload.extend(b"\x00" * (target_size - len(payload)))
 
     return bytes(payload)
 

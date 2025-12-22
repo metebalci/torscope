@@ -190,7 +190,7 @@ class RelayCrypto:
 
     Each direction (forward/backward) has:
     - AES-128-CTR cipher state (maintains counter across cells)
-    - Running SHA-1 digest state (maintained as hashlib object)
+    - Running digest state (SHA-1 for regular hops, SHA3-256 for HS hops)
     """
 
     # AES-128-CTR cipher for encryption (forward direction)
@@ -201,7 +201,7 @@ class RelayCrypto:
     _cipher_backward: Cipher | None = field(default=None, repr=False)
     _decryptor: CipherContext | None = field(default=None, repr=False)
 
-    # Running SHA-1 digest state objects (forward/backward)
+    # Running digest state objects (forward/backward)
     # These maintain incremental state across all cells
     _digest_forward_state: "hashlib._Hash | None" = field(default=None, repr=False)
     _digest_backward_state: "hashlib._Hash | None" = field(default=None, repr=False)
@@ -215,7 +215,9 @@ class RelayCrypto:
         digest_backward: bytes,
     ) -> "RelayCrypto":
         """
-        Create RelayCrypto with keys from ntor handshake.
+        Create RelayCrypto with keys from ntor handshake (for regular hops).
+
+        Uses SHA-1 for running digest (20-byte seeds).
 
         Args:
             key_forward: 16-byte AES key for forward direction (Kf)
@@ -244,6 +246,58 @@ class RelayCrypto:
         digest_forward_state = hashlib.sha1()
         digest_forward_state.update(digest_forward)
         digest_backward_state = hashlib.sha1()
+        digest_backward_state.update(digest_backward)
+
+        instance = cls()
+        instance._cipher_forward = cipher_forward
+        instance._cipher_backward = cipher_backward
+        instance._encryptor = cipher_forward.encryptor()
+        instance._decryptor = cipher_backward.decryptor()
+        instance._digest_forward_state = digest_forward_state
+        instance._digest_backward_state = digest_backward_state
+
+        return instance
+
+    @classmethod
+    def create_hs(
+        cls,
+        key_forward: bytes,
+        key_backward: bytes,
+        digest_forward: bytes,
+        digest_backward: bytes,
+    ) -> "RelayCrypto":
+        """
+        Create RelayCrypto for hidden service hop (from hs-ntor handshake).
+
+        Uses SHA3-256 for running digest (32-byte seeds) and AES-256 for encryption.
+        See: https://spec.torproject.org/rend-spec/introduction-protocol.html#NTOR-WITH-EXTRA-DATA
+        "instead of using AES-128 and SHA1 for this hop, we use AES-256 and SHA3-256"
+
+        Args:
+            key_forward: 32-byte AES-256 key for forward direction (Kf)
+            key_backward: 32-byte AES-256 key for backward direction (Kb)
+            digest_forward: 32-byte initial digest seed for forward (Df)
+            digest_backward: 32-byte initial digest seed for backward (Db)
+        """
+        if len(key_forward) != 32:
+            raise ValueError("key_forward must be 32 bytes for HS (AES-256)")
+        if len(key_backward) != 32:
+            raise ValueError("key_backward must be 32 bytes for HS (AES-256)")
+        if len(digest_forward) != 32:
+            raise ValueError("digest_forward must be 32 bytes for HS")
+        if len(digest_backward) != 32:
+            raise ValueError("digest_backward must be 32 bytes for HS")
+
+        # Create AES-256-CTR ciphers with zero IV
+        iv = b"\x00" * 16
+
+        cipher_forward = Cipher(algorithms.AES(key_forward), modes.CTR(iv))
+        cipher_backward = Cipher(algorithms.AES(key_backward), modes.CTR(iv))
+
+        # Initialize running SHA3-256 digest states for hidden service hop
+        digest_forward_state = hashlib.sha3_256()
+        digest_forward_state.update(digest_forward)
+        digest_backward_state = hashlib.sha3_256()
         digest_backward_state.update(digest_backward)
 
         instance = cls()
@@ -657,13 +711,14 @@ def create_establish_rendezvous_payload(rendezvous_cookie: bytes) -> bytes:
     return rendezvous_cookie
 
 
-def create_introduce1_payload(
+def build_introduce1_cell_without_mac(
     auth_key: bytes,
     client_pk: bytes,
     encrypted_data: bytes,
-    mac: bytes,
 ) -> bytes:
-    """Create payload for RELAY_INTRODUCE1 cell.
+    """Build INTRODUCE1 cell payload without the MAC.
+
+    The MAC must be computed over this payload and then appended.
 
     Format:
         LEGACY_KEY_ID      [20 bytes] - All zeros for v3
@@ -671,26 +726,22 @@ def create_introduce1_payload(
         AUTH_KEY_LEN       [2 bytes]
         AUTH_KEY           [AUTH_KEY_LEN bytes]
         N_EXTENSIONS       [1 byte]   - 0
-        ENCRYPTED:
+        ENCRYPTED (partial, no MAC):
             CLIENT_PK      [32 bytes]
             ENCRYPTED_DATA [variable]
-            MAC            [32 bytes]
 
     Args:
         auth_key: 32-byte Ed25519 auth key from intro point
         client_pk: 32-byte X25519 ephemeral public key
         encrypted_data: Encrypted introduce data
-        mac: 32-byte MAC
 
     Returns:
-        INTRODUCE1 cell payload
+        INTRODUCE1 cell payload without MAC (caller must compute and append MAC)
     """
     if len(auth_key) != 32:
         raise ValueError("auth_key must be 32 bytes")
     if len(client_pk) != 32:
         raise ValueError("client_pk must be 32 bytes")
-    if len(mac) != 32:
-        raise ValueError("mac must be 32 bytes")
 
     payload = bytearray()
 
@@ -709,10 +760,9 @@ def create_introduce1_payload(
     # N_EXTENSIONS [1 byte] - no extensions
     payload.append(0)
 
-    # ENCRYPTED section
+    # ENCRYPTED section (without MAC)
     payload.extend(client_pk)  # CLIENT_PK [32 bytes]
     payload.extend(encrypted_data)  # ENCRYPTED_DATA
-    payload.extend(mac)  # MAC [32 bytes]
 
     return bytes(payload)
 

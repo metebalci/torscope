@@ -7,6 +7,7 @@ from Tor directory authorities.
 
 import httpx
 
+from torscope import output
 from torscope.directory.authority import (
     DirectoryAuthority,
     get_random_authority,
@@ -76,6 +77,8 @@ class DirectoryClient:
         else:
             url = f"{authority.http_url}/tor/status-vote/current/consensus"
 
+        output.verbose(f"GET {url}")
+
         # Set headers to request compression
         headers = {
             "Accept-Encoding": "deflate, gzip",
@@ -86,6 +89,7 @@ class DirectoryClient:
         with httpx.Client(timeout=self.timeout) as client:
             response = client.get(url, headers=headers, follow_redirects=True)
             response.raise_for_status()
+            output.debug(f"Response: {response.status_code}, {len(response.content)} bytes")
             return response.content, authority
 
     def fetch_microdescriptors(
@@ -113,6 +117,9 @@ class DirectoryClient:
         hash_string = "-".join(h.rstrip("=") for h in hashes)
         url = f"{authority.http_url}/tor/micro/d/{hash_string}"
 
+        output.verbose(f"GET microdescriptors ({len(hashes)} hashes) from {authority.nickname}")
+        output.debug(f"URL: {url[:80]}...")
+
         headers = {
             "Accept-Encoding": "deflate, gzip",
             "User-Agent": "torscope/0.1.0",
@@ -121,6 +128,7 @@ class DirectoryClient:
         with httpx.Client(timeout=self.timeout) as client:
             response = client.get(url, headers=headers, follow_redirects=True)
             response.raise_for_status()
+            output.debug(f"Response: {response.status_code}, {len(response.content)} bytes")
             return response.content, authority
 
     def fetch_server_descriptors(
@@ -148,6 +156,8 @@ class DirectoryClient:
         fp_string = "+".join(fingerprints)
         url = f"{authority.http_url}/tor/server/fp/{fp_string}"
 
+        output.verbose(f"GET server descriptors ({len(fingerprints)}) from {authority.nickname}")
+
         headers = {
             "Accept-Encoding": "deflate, gzip",
             "User-Agent": "torscope/0.1.0",
@@ -156,6 +166,7 @@ class DirectoryClient:
         with httpx.Client(timeout=self.timeout) as client:
             response = client.get(url, headers=headers, follow_redirects=True)
             response.raise_for_status()
+            output.debug(f"Response: {response.status_code}, {len(response.content)} bytes")
             return response.content, authority
 
     def fetch_extra_info(
@@ -183,6 +194,8 @@ class DirectoryClient:
         fp_string = "+".join(fingerprints)
         url = f"{authority.http_url}/tor/extra/fp/{fp_string}"
 
+        output.verbose(f"GET extra-info ({len(fingerprints)}) from {authority.nickname}")
+
         headers = {
             "Accept-Encoding": "deflate, gzip",
             "User-Agent": "torscope/0.1.0",
@@ -191,6 +204,7 @@ class DirectoryClient:
         with httpx.Client(timeout=self.timeout) as client:
             response = client.get(url, headers=headers, follow_redirects=True)
             response.raise_for_status()
+            output.debug(f"Response: {response.status_code}, {len(response.content)} bytes")
             return response.content, authority
 
     def fetch_key_certificates(
@@ -236,6 +250,8 @@ class DirectoryClient:
         """Fetch key certificates from a specific authority."""
         url = f"{authority.http_url}/tor/keys/all"
 
+        output.verbose(f"GET key certificates from {authority.nickname}")
+
         headers = {
             "Accept-Encoding": "deflate, gzip",
             "User-Agent": "torscope/0.1.0",
@@ -244,4 +260,5 @@ class DirectoryClient:
         with httpx.Client(timeout=self.timeout) as client:
             response = client.get(url, headers=headers, follow_redirects=True)
             response.raise_for_status()
+            output.debug(f"Response: {response.status_code}, {len(response.content)} bytes")
             return response.content, authority

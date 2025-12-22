@@ -32,15 +32,15 @@ from torscope.onion.hs_ntor import (
     create_introduce1_encrypted_payload,
     generate_rendezvous_cookie,
 )
-from torscope.onion.ntor import CircuitKeys
+from torscope.onion.ntor import HsCircuitKeys
 from torscope.onion.relay import (
     IntroduceAckStatus,
     LinkSpecifier,
     RelayCell,
     RelayCommand,
     RelayCrypto,
+    build_introduce1_cell_without_mac,
     create_establish_rendezvous_payload,
-    create_introduce1_payload,
     parse_introduce_ack,
     parse_rendezvous2,
 )
@@ -317,23 +317,28 @@ def send_introduce(
         elif s.spec_type == 3:  # Ed25519 ID
             _log(f"  Ed25519 ID: {s.data.hex()[:32]}...")
 
-    # Create encrypted payload
+    # Create encrypted payload plaintext
     encrypted_plaintext = create_introduce1_encrypted_payload(
         rendezvous_cookie=rendezvous_cookie,
         rendezvous_link_specifiers=[(s.spec_type, s.data) for s in rp_specs],
         rendezvous_onion_key=rendezvous_ntor_key,
     )
 
-    # Encrypt with hs-ntor keys (pass auth_key for MAC computation)
-    ciphertext, mac = hs_ntor.encrypt_introduce_data(encrypted_plaintext, intro_point.auth_key)
+    # Encrypt with hs-ntor keys
+    ciphertext = hs_ntor.encrypt_introduce_data(encrypted_plaintext)
 
-    # Build INTRODUCE1 cell
-    introduce1_data = create_introduce1_payload(
+    # Build INTRODUCE1 cell without MAC
+    cell_without_mac = build_introduce1_cell_without_mac(
         auth_key=intro_point.auth_key,
         client_pk=hs_ntor.client_pubkey,
         encrypted_data=ciphertext,
-        mac=mac,
     )
+
+    # Compute MAC over the entire cell (per Tor's compute_introduce_mac)
+    mac = hs_ntor.compute_introduce_mac(cell_without_mac)
+
+    # Complete the INTRODUCE1 cell by appending the MAC
+    introduce1_data = cell_without_mac + mac
 
     _log(f"Sending INTRODUCE1 ({len(introduce1_data)} bytes)")
     _log(f"  intro auth_key: {intro_point.auth_key.hex()[:32]}...")
@@ -431,10 +436,17 @@ def complete_rendezvous(
         raise RendezvousError("hs-ntor handshake verification failed")
 
     _log("hs-ntor handshake completed")
+    _log(f"  key_material: {key_material.hex()[:32]}... ({len(key_material)} bytes)")
 
     # Add hidden service hop to circuit
-    keys = CircuitKeys.from_key_material(key_material)
-    crypto_layer = RelayCrypto.create(
+    # HS hops use SHA3-256 (32-byte digests) and AES-256 (32-byte keys)
+    keys = HsCircuitKeys.from_key_material(key_material)
+    _log(f"  Df: {keys.digest_forward.hex()[:32]}... (32 bytes)")
+    _log(f"  Db: {keys.digest_backward.hex()[:32]}... (32 bytes)")
+    _log(f"  Kf: {keys.key_forward.hex()[:32]}... (32 bytes)")
+    _log(f"  Kb: {keys.key_backward.hex()[:32]}... (32 bytes)")
+    # Use create_hs for hidden service hop (SHA3-256 digests, AES-256 encryption)
+    crypto_layer = RelayCrypto.create_hs(
         key_forward=keys.key_forward,
         key_backward=keys.key_backward,
         digest_forward=keys.digest_forward,
@@ -442,7 +454,7 @@ def complete_rendezvous(
     )
     circuit._crypto_layers.append(crypto_layer)  # pylint: disable=protected-access
 
-    _log("Hidden service hop added to circuit")
+    _log("Hidden service hop added to circuit (SHA3-256 digests, AES-256 encryption)")
 
 
 def rendezvous_connect(

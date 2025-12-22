@@ -7,10 +7,12 @@ hops (relays). Each hop is established using the ntor handshake.
 
 import secrets
 import struct
+import time
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from types import TracebackType
 
+from torscope import output
 from torscope.onion.cell import (
     HTYPE_NTOR,
     Cell,
@@ -87,6 +89,7 @@ class Circuit:
         # For link protocol 4+, circ_id is 4 bytes
         # High bit indicates who created the circuit (1 = we did)
         circ_id = secrets.randbits(31) | 0x80000000
+        output.debug(f"Allocated circuit ID: {circ_id:#010x}")
 
         return cls(connection=connection, circ_id=circ_id)
 
@@ -143,8 +146,10 @@ class Circuit:
     ) -> bool:
         """Create the first hop using CREATE2 cell."""
         self.state = CircuitState.BUILDING
+        output.debug(f"Creating first hop to {fingerprint[:16]}...")
 
         # Send CREATE2 cell
+        output.verbose(f"CREATE2 → (ntor handshake, {len(onion_skin)} bytes)")
         create2 = Create2Cell(
             circ_id=self.circ_id,
             htype=HTYPE_NTOR,
@@ -154,21 +159,26 @@ class Circuit:
 
         # Receive response
         response = self.connection.recv_cell()
+        output.verbose(f"{response.command.name} ←")
 
         if response.command == CellCommand.CREATED2:
             # Extract HDATA from CREATED2 payload
             hlen = struct.unpack(">H", response.payload[0:2])[0]
             hdata = response.payload[2 : 2 + hlen]
+            output.debug(f"CREATED2 hdata: {hlen} bytes")
 
             # Complete handshake and derive keys
+            output.debug("Completing ntor handshake and deriving keys")
             key_material = ntor_state.complete_handshake(hdata)
 
             if key_material is None:
+                output.debug("ntor handshake failed")
                 self.state = CircuitState.FAILED
                 return False
 
             # Store hop with keys
             keys = CircuitKeys.from_key_material(key_material)
+            output.debug(f"Derived circuit keys: Kf={keys.key_forward.hex()[:16]}...")
             hop = CircuitHop(
                 fingerprint=fingerprint,
                 ntor_onion_key=ntor_onion_key,
@@ -187,12 +197,15 @@ class Circuit:
             )
 
             self.state = CircuitState.OPEN
+            output.verbose(f"First hop established ({fingerprint[:16]}...)")
             return True
 
         if response.command == CellCommand.DESTROY:
+            output.debug(f"Received DESTROY: {response.payload[0] if response.payload else 0}")
             self.state = CircuitState.FAILED
             return False
 
+        output.debug(f"Unexpected response: {response.command.name}")
         self.state = CircuitState.FAILED
         return False
 
@@ -206,6 +219,8 @@ class Circuit:
         port: int,
     ) -> bool:
         """Extend circuit using RELAY_EXTEND2."""
+        output.debug(f"Extending circuit to {fingerprint[:16]}... ({ip}:{port})")
+
         # Build link specifiers
         link_specs = [
             LinkSpecifier.from_ipv4(ip, port),
@@ -221,6 +236,7 @@ class Circuit:
 
         # Send RELAY_EXTEND2 (stream_id must be 0 for control messages)
         # Must use RELAY_EARLY cell for EXTEND2 per tor-spec
+        output.verbose(f"RELAY_EXTEND2 → {ip}:{port}")
         extend2_cell = RelayCell(
             relay_command=RelayCommand.EXTEND2,
             stream_id=0,
@@ -231,22 +247,29 @@ class Circuit:
         # Wait for RELAY_EXTENDED2
         response = self.recv_relay()
         if response is None:
+            output.debug("No response to EXTEND2")
             self.state = CircuitState.FAILED
             return False
+
+        output.verbose(f"{response.relay_command.name} ←")
 
         if response.relay_command == RelayCommand.EXTENDED2:
             # Parse EXTENDED2 payload (same as CREATED2: HLEN + HDATA)
             hdata = parse_extended2_payload(response.data)
+            output.debug(f"EXTENDED2 hdata: {len(hdata)} bytes")
 
             # Complete handshake and derive keys
+            output.debug("Completing ntor handshake and deriving keys")
             key_material = ntor_state.complete_handshake(hdata)
 
             if key_material is None:
+                output.debug("ntor handshake failed")
                 self.state = CircuitState.FAILED
                 return False
 
             # Store hop with keys
             keys = CircuitKeys.from_key_material(key_material)
+            output.debug(f"Derived circuit keys: Kf={keys.key_forward.hex()[:16]}...")
             hop = CircuitHop(
                 fingerprint=fingerprint,
                 ntor_onion_key=ntor_onion_key,
@@ -264,9 +287,11 @@ class Circuit:
                 )
             )
 
+            output.verbose(f"Hop {len(self.hops)} established ({fingerprint[:16]}...)")
             return True
 
         # Extension failed (could be TRUNCATED or other error)
+        output.debug(f"Extension failed: {response.relay_command.name}")
         return False
 
     def destroy(self) -> None:
@@ -274,6 +299,7 @@ class Circuit:
         if self.state in (CircuitState.CLOSED, CircuitState.NEW):
             return
 
+        output.verbose(f"DESTROY → (circuit {self.circ_id:#010x})")
         try:
             destroy = DestroyCell(
                 circ_id=self.circ_id,
@@ -284,6 +310,7 @@ class Circuit:
             pass
 
         self.state = CircuitState.CLOSED
+        output.debug("Circuit destroyed")
 
     @property
     def is_open(self) -> bool:
@@ -354,11 +381,24 @@ class Circuit:
         if not self._crypto_layers:
             raise RuntimeError("Circuit crypto not initialized")
 
-        # Receive cell
-        cell = self.connection.recv_cell()
+        # Receive cell (skip PADDING cells, with timeout)
+        start_time = time.time()
+        timeout = self.connection.timeout
+        while True:
+            # Check if we've exceeded the connection timeout
+            if time.time() - start_time > timeout:
+                raise TimeoutError("Timeout while waiting for non-PADDING cell")
 
-        if debug:
-            print(f"    [debug] Received cell: cmd={cell.command.name}")
+            cell = self.connection.recv_cell()
+
+            # PADDING cells should be silently ignored
+            if cell.command == CellCommand.PADDING:
+                output.debug("Received PADDING cell, skipping")
+                continue
+
+            if debug:
+                print(f"    [debug] Received cell: cmd={cell.command.name}")
+            break
 
         if cell.command == CellCommand.DESTROY:
             reason = cell.payload[0] if cell.payload else 0
@@ -395,15 +435,26 @@ class Circuit:
         # so we decrypt in the same order they encrypted.
         payload = cell.payload[:RELAY_BODY_LEN]
 
+        if debug:
+            print(f"    [debug] Decrypting through {len(self._crypto_layers)} layers")
+
         for i, layer in enumerate(self._crypto_layers):
             # For all but the last layer, just decrypt raw
             if i < len(self._crypto_layers) - 1:
                 payload = layer.decrypt_raw(payload)
+                if debug:
+                    recognized = (payload[1] << 8) | payload[2]
+                    print(f"    [debug] After layer {i}: recognized={recognized}")
             else:
                 # Last layer - check digest and parse
                 result = layer.decrypt_backward(payload)
-                if debug and result is None:
-                    print("    [debug] decrypt_backward failed (bad recognized or digest)")
+                if debug:
+                    if result is None:
+                        recognized = (payload[1] << 8) | payload[2]
+                        print(f"    [debug] Layer {i} failed (recognized={recognized})")
+                    else:
+                        cmd = result.relay_command.name
+                        print(f"    [debug] Layer {i} decrypt_backward OK: {cmd}")
                 return result
 
         return None
@@ -420,28 +471,40 @@ class Circuit:
             Stream ID if successful, None if failed
         """
         stream_id = self._allocate_stream_id()
+        output.debug(f"Allocated stream ID: {stream_id}")
 
         # Send RELAY_BEGIN
+        output.verbose(f"RELAY_BEGIN → {address}:{port} (stream {stream_id})")
+        output.debug(f"Sending through {len(self._crypto_layers)} crypto layers")
         begin_cell = RelayCell(
             relay_command=RelayCommand.BEGIN,
             stream_id=stream_id,
             data=create_begin_payload(address, port),
         )
+        # Debug: show the plaintext before encryption
+        packed = begin_cell.pack_payload()
+        output.debug(f"BEGIN plaintext (first 20 bytes): {packed[:20].hex()}")
         self.send_relay(begin_cell)
 
         # Wait for RELAY_CONNECTED or RELAY_END
-        response = self.recv_relay()
+        response = self.recv_relay(debug=output.is_debug())
         if response is None:
+            output.debug("No response to BEGIN")
             return None
 
+        output.verbose(f"{response.relay_command.name} ← (stream {response.stream_id})")
+
         if response.relay_command == RelayCommand.CONNECTED:
+            output.debug(f"Stream {stream_id} connected")
             return stream_id
 
         if response.relay_command == RelayCommand.END:
             # Stream was rejected
+            output.debug("Stream rejected: END received")
             return None
 
         # Unexpected response
+        output.debug(f"Unexpected response: {response.relay_command.name}")
         return None
 
     def begin_dir(self) -> int | None:
@@ -455,8 +518,10 @@ class Circuit:
             Stream ID if successful, None if failed
         """
         stream_id = self._allocate_stream_id()
+        output.debug(f"Allocated stream ID: {stream_id}")
 
         # Send RELAY_BEGIN_DIR (no payload needed)
+        output.verbose(f"RELAY_BEGIN_DIR → (stream {stream_id})")
         begin_dir_cell = RelayCell(
             relay_command=RelayCommand.BEGIN_DIR,
             stream_id=stream_id,
@@ -467,16 +532,22 @@ class Circuit:
         # Wait for RELAY_CONNECTED or RELAY_END
         response = self.recv_relay()
         if response is None:
+            output.debug("No response to BEGIN_DIR")
             return None
 
+        output.verbose(f"{response.relay_command.name} ← (stream {response.stream_id})")
+
         if response.relay_command == RelayCommand.CONNECTED:
+            output.debug(f"Directory stream {stream_id} connected")
             return stream_id
 
         if response.relay_command == RelayCommand.END:
             # Directory stream was rejected (relay may not support V2Dir)
+            output.debug("Directory stream rejected (no V2Dir support?)")
             return None
 
         # Unexpected response
+        output.debug(f"Unexpected response: {response.relay_command.name}")
         return None
 
     def resolve(self, hostname: str) -> list[ResolvedAnswer]:
@@ -501,6 +572,7 @@ class Circuit:
         stream_id = self._allocate_stream_id()
 
         # Send RELAY_RESOLVE
+        output.verbose(f"RELAY_RESOLVE → {hostname} (stream {stream_id})")
         resolve_cell = RelayCell(
             relay_command=RelayCommand.RESOLVE,
             stream_id=stream_id,
@@ -511,19 +583,27 @@ class Circuit:
         # Wait for RELAY_RESOLVED
         response = self.recv_relay()
         if response is None:
+            output.debug("No response to RESOLVE")
             return []
+
+        output.verbose(f"{response.relay_command.name} ← (stream {response.stream_id})")
 
         if response.relay_command == RelayCommand.RESOLVED:
             if response.stream_id != stream_id:
                 # Mismatched stream ID
+                output.debug(f"Stream ID mismatch: got {response.stream_id}, want {stream_id}")
                 return []
-            return parse_resolved_payload(response.data)
+            answers = parse_resolved_payload(response.data)
+            output.debug(f"Resolved to {len(answers)} answer(s)")
+            return answers
 
         if response.relay_command == RelayCommand.END:
             # Resolution failed
+            output.debug("Resolution failed (END received)")
             return []
 
         # Unexpected response
+        output.debug(f"Unexpected response: {response.relay_command.name}")
         return []
 
     def end_stream(self, stream_id: int, reason: RelayEndReason = RelayEndReason.DONE) -> None:

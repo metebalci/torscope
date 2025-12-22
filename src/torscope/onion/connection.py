@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from types import TracebackType
 from typing import Any
 
+from torscope import output
 from torscope.onion.cell import (
     CELL_LEN_V3,
     CELL_LEN_V4,
@@ -52,12 +53,16 @@ class RelayConnection:
         Creates a TLS connection without validating the relay's certificate
         (Tor has its own certificate validation via CERTS cell).
         """
+        output.debug(f"Creating TCP socket to {self.host}:{self.port}")
+
         # Create TCP socket
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._socket.settimeout(self.timeout)
         self._socket.connect((self.host, self.port))
+        output.debug("TCP connection established")
 
         # Wrap with TLS (no certificate verification - Tor handles this differently)
+        output.debug("Initiating TLS handshake")
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
@@ -65,6 +70,7 @@ class RelayConnection:
         context.minimum_version = ssl.TLSVersion.TLSv1_2
 
         self._tls_socket = context.wrap_socket(self._socket, server_hostname=self.host)
+        output.debug(f"TLS version: {self._tls_socket.version()}")
 
     def close(self) -> None:
         """Close the connection."""
@@ -100,6 +106,7 @@ class RelayConnection:
             raise ConnectionError("Not connected")
 
         # Send our VERSIONS cell
+        output.verbose(f"VERSIONS → (supported: {self.SUPPORTED_VERSIONS})")
         versions_cell = VersionsCell(versions=self.SUPPORTED_VERSIONS)
         self._send_raw(versions_cell.pack())
 
@@ -107,12 +114,15 @@ class RelayConnection:
         their_versions_data = self._recv_variable_cell_v3()
         their_versions = VersionsCell.unpack(their_versions_data)
         self.their_versions = their_versions.versions
+        output.verbose(f"VERSIONS ← (their versions: {self.their_versions})")
 
         # Negotiate highest common version
         common = set(self.SUPPORTED_VERSIONS) & set(self.their_versions)
         if not common:
+            output.debug("No common link protocol version")
             return False
         self.link_protocol = max(common)
+        output.verbose(f"Negotiated link protocol v{self.link_protocol}")
 
         # Now receive CERTS, AUTH_CHALLENGE, NETINFO from responder
         # These use the negotiated link protocol's CircID size
@@ -120,14 +130,18 @@ class RelayConnection:
         # Receive CERTS cell
         certs_data = self._recv_variable_cell()
         self.certs = CertsCell.unpack(certs_data, self.link_protocol)
+        output.verbose(f"CERTS ← ({len(self.certs.certificates)} certificates)")
+        output.debug(f"Certificate types: {[c[0] for c in self.certs.certificates]}")
 
         # Receive AUTH_CHALLENGE cell
         auth_data = self._recv_variable_cell()
         self.auth_challenge = AuthChallengeCell.unpack(auth_data, self.link_protocol)
+        output.verbose(f"AUTH_CHALLENGE ← ({len(self.auth_challenge.challenge)} bytes)")
 
         # Receive NETINFO cell (fixed-length)
         netinfo_data = self._recv_fixed_cell()
         their_netinfo = NetInfoCell.unpack(netinfo_data, self.link_protocol)
+        output.verbose(f"NETINFO ← (their addresses: {len(their_netinfo.my_addresses)})")
 
         # Send our NETINFO cell
         # We use their address as the "other address"
@@ -140,7 +154,9 @@ class RelayConnection:
             my_addresses=[],  # We don't need to advertise our addresses
         )
         self._send_raw(my_netinfo.pack(self.link_protocol))
+        output.verbose("NETINFO →")
 
+        output.debug("Link handshake complete")
         return True
 
     def _send_raw(self, data: bytes) -> None:
