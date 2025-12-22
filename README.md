@@ -83,7 +83,7 @@ It implements the Tor directory protocol and OR (Onion Router) protocol, allowin
 - XOFF/XON congestion control
 - Conflux (multi-path circuits)
 - AUTHENTICATE cell (relay authentication)
-- Pluggable transports: Snowflake, meek (obfs4 and WebTunnel are supported)
+- Pluggable transports: Snowflake
 
 ### Other
 - REST API
@@ -94,6 +94,7 @@ It implements the Tor directory protocol and OR (Onion Router) protocol, allowin
 - Control protocol (stem-like interface)
 - Connection pooling/reuse
 - Onion service publication (server-side)
+- Pluggable transports: meek
 
 # Installation
 
