@@ -1453,6 +1453,11 @@ def _open_stream_onion(args: argparse.Namespace, target_addr: str, target_port: 
         hsdirs = [hsdir]
     else:
         hsdirs = hsdir_ring.get_responsible_hsdirs(blinded_key)
+        output.verbose(f"Found {len(hsdirs)} responsible HSDirs")
+        print(f"Responsible HSDirs ({len(hsdirs)}):", file=sys.stderr)
+        for i, hsdir in enumerate(hsdirs):
+            output.debug(f"HSDir {i+1}: {hsdir.nickname} ({hsdir.fingerprint[:16]}...)")
+            print(f"  [{i+1}] {hsdir.nickname} ({hsdir.ip}:{hsdir.orport})", file=sys.stderr)
 
     # Fetch descriptor
     descriptor_text = None
