@@ -18,14 +18,20 @@ from torscope.onion.cell import (
     Cell,
     CellCommand,
     Create2Cell,
+    CreatedFastCell,
+    CreateFastCell,
     DestroyCell,
+    FastCircuitKeys,
 )
 from torscope.onion.connection import RelayConnection
 from torscope.onion.ntor import CircuitKeys, NtorClientState, node_id_from_fingerprint
 from torscope.onion.relay import (
     RELAY_BODY_LEN,
     RELAY_DATA_LEN,
+    CircpadCommand,
+    CircpadMachineType,
     LinkSpecifier,
+    PaddingNegotiated,
     RelayCell,
     RelayCommand,
     RelayCrypto,
@@ -34,8 +40,10 @@ from torscope.onion.relay import (
     create_begin_payload,
     create_end_payload,
     create_extend2_payload,
+    create_padding_negotiate_payload,
     create_resolve_payload,
     parse_extended2_payload,
+    parse_padding_negotiated_payload,
     parse_resolved_payload,
 )
 
@@ -136,6 +144,102 @@ class Circuit:
             raise ValueError("ip and port required for extending circuit")
 
         return self._extend_circuit(fingerprint, ntor_onion_key, ntor_state, onion_skin, ip, port)
+
+    def create_fast(self, fingerprint: str) -> bool:
+        """
+        Create a one-hop circuit using CREATE_FAST handshake.
+
+        CREATE_FAST uses a simpler key exchange that doesn't require the relay's
+        ntor-onion-key. It relies on TLS for identity verification and uses SHA1-based
+        key derivation. Only suitable for one-hop circuits.
+
+        Args:
+            fingerprint: Relay's fingerprint (40 hex chars)
+
+        Returns:
+            True if handshake succeeded, False otherwise
+
+        See: https://spec.torproject.org/tor-spec/create-created-cells.html
+        """
+        if self.state == CircuitState.CLOSED:
+            raise RuntimeError("Circuit is closed")
+        if len(self.hops) > 0:
+            raise RuntimeError("CREATE_FAST can only be used for the first hop")
+
+        self.state = CircuitState.BUILDING
+        output.verbose("CREATE_FAST → (simple handshake)")
+
+        # Generate 20 random bytes (X)
+        x = secrets.token_bytes(20)
+        output.debug(f"Generated X: {x.hex()[:20]}...")
+
+        # Send CREATE_FAST cell
+        create_fast = CreateFastCell(circ_id=self.circ_id, x=x)
+        self.connection.send_cell(create_fast)
+
+        # Receive response
+        response = self.connection.recv_cell()
+        output.verbose(f"{response.command.name} ←")
+
+        if response.command == CellCommand.CREATED_FAST:
+            # Parse CREATED_FAST response
+            try:
+                created_fast = CreatedFastCell.unpack(
+                    response.pack(self.connection.link_protocol),
+                    self.connection.link_protocol,
+                )
+            except ValueError as e:
+                output.debug(f"Failed to parse CREATED_FAST: {e}")
+                self.state = CircuitState.FAILED
+                return False
+
+            output.debug(f"Received Y: {created_fast.y.hex()[:20]}...")
+            output.debug(f"Received KH: {created_fast.kh.hex()}")
+
+            # Derive keys using KDF-TOR
+            keys = FastCircuitKeys.from_key_material(x, created_fast.y)
+            output.debug(f"Derived KH: {keys.kh.hex()}")
+
+            # Verify derivative key hash
+            if not keys.verify(created_fast.kh):
+                output.debug("KH verification failed!")
+                self.state = CircuitState.FAILED
+                return False
+
+            output.debug("KH verified successfully")
+            output.debug(f"Derived circuit keys: Kf={keys.key_forward.hex()}")
+
+            # Store hop (without ntor_onion_key since we didn't use it)
+            hop = CircuitHop(
+                fingerprint=fingerprint,
+                ntor_onion_key=b"",  # Not used for CREATE_FAST
+                keys=None,  # FastCircuitKeys is different from CircuitKeys
+            )
+            self.hops.append(hop)
+
+            # Add crypto layer
+            self._crypto_layers.append(
+                RelayCrypto.create(
+                    key_forward=keys.key_forward,
+                    key_backward=keys.key_backward,
+                    digest_forward=keys.digest_forward,
+                    digest_backward=keys.digest_backward,
+                )
+            )
+
+            self.state = CircuitState.OPEN
+            output.verbose(f"One-hop circuit established via CREATE_FAST ({fingerprint[:16]}...)")
+            return True
+
+        if response.command == CellCommand.DESTROY:
+            reason = response.payload[0] if response.payload else 0
+            output.debug(f"Received DESTROY: reason={reason}")
+            self.state = CircuitState.FAILED
+            return False
+
+        output.debug(f"Unexpected response: {response.command.name}")
+        self.state = CircuitState.FAILED
+        return False
 
     def _create_first_hop(
         self,
@@ -631,6 +735,69 @@ class Circuit:
             data=create_end_payload(reason),
         )
         self.send_relay(end_cell)
+
+    def negotiate_padding(
+        self,
+        command: CircpadCommand = CircpadCommand.START,
+        machine_type: CircpadMachineType = CircpadMachineType.CIRC_SETUP,
+    ) -> PaddingNegotiated | None:
+        """
+        Negotiate circuit padding with the relay.
+
+        Sends a PADDING_NEGOTIATE cell to request circuit padding and waits
+        for a PADDING_NEGOTIATED response.
+
+        See: https://spec.torproject.org/padding-spec/circuit-level-padding.html
+
+        Args:
+            command: START to enable padding, STOP to disable
+            machine_type: Type of padding machine (default: CIRC_SETUP)
+
+        Returns:
+            PaddingNegotiated response if successful, None if failed
+        """
+        if not self.is_open:
+            raise RuntimeError("Circuit is not open")
+
+        # Create PADDING_NEGOTIATE payload
+        negotiate_data = create_padding_negotiate_payload(
+            command=command,
+            machine_type=machine_type,
+        )
+
+        # Send RELAY_PADDING_NEGOTIATE (stream_id must be 0 for control messages)
+        cmd_name = "START" if command == CircpadCommand.START else "STOP"
+        output.verbose(f"RELAY_PADDING_NEGOTIATE → {cmd_name}")
+        negotiate_cell = RelayCell(
+            relay_command=RelayCommand.PADDING_NEGOTIATE,
+            stream_id=0,
+            data=negotiate_data,
+        )
+        self.send_relay(negotiate_cell)
+
+        # Wait for RELAY_PADDING_NEGOTIATED
+        response = self.recv_relay()
+        if response is None:
+            output.debug("No response to PADDING_NEGOTIATE")
+            return None
+
+        output.verbose(f"{response.relay_command.name} ←")
+
+        if response.relay_command == RelayCommand.PADDING_NEGOTIATED:
+            try:
+                negotiated = parse_padding_negotiated_payload(response.data)
+                if negotiated.is_ok:
+                    output.debug("Padding negotiation successful")
+                else:
+                    output.debug("Padding negotiation failed (relay returned ERR)")
+                return negotiated
+            except ValueError as e:
+                output.debug(f"Failed to parse PADDING_NEGOTIATED: {e}")
+                return None
+
+        # Unexpected response
+        output.debug(f"Unexpected response: {response.relay_command.name}")
+        return None
 
     def send_data(self, stream_id: int, data: bytes, debug: bool = False) -> None:
         """

@@ -461,6 +461,83 @@ class Created2Cell:
         return cls(circ_id=cell.circ_id, hdata=hdata)
 
 
+# SHA1 output length (for CREATE_FAST key material)
+SHA1_LEN = 20
+# AES-128 key length
+KEY_LEN = 16
+
+
+@dataclass
+class CreateFastCell:
+    """
+    CREATE_FAST cell for one-hop circuit creation.
+
+    Uses a simpler key exchange that doesn't require public key operations.
+    Only suitable for one-hop circuits where the client has already
+    established the relay's identity via TLS.
+
+    Payload: 20 random bytes (X)
+    """
+
+    circ_id: int
+    x: bytes  # 20 random bytes
+
+    def pack(self, link_protocol: int = 4) -> bytes:
+        """Pack CREATE_FAST cell."""
+        if len(self.x) != SHA1_LEN:
+            raise ValueError(f"x must be {SHA1_LEN} bytes")
+
+        cell = Cell(circ_id=self.circ_id, command=CellCommand.CREATE_FAST, payload=self.x)
+        return cell.pack(link_protocol)
+
+    @classmethod
+    def unpack(cls, data: bytes, link_protocol: int = 4) -> "CreateFastCell":
+        """Unpack CREATE_FAST cell."""
+        cell = Cell.unpack(data, link_protocol)
+        x = cell.payload[:SHA1_LEN]
+        return cls(circ_id=cell.circ_id, x=x)
+
+
+@dataclass
+class CreatedFastCell:
+    """
+    CREATED_FAST cell - response to CREATE_FAST.
+
+    Contains server's key material and a hash for verification.
+
+    Payload: 20 bytes (Y) + 20 bytes (KH - derivative key hash)
+    """
+
+    circ_id: int
+    y: bytes  # 20 random bytes from server
+    kh: bytes  # 20-byte derivative key hash
+
+    def pack(self, link_protocol: int = 4) -> bytes:
+        """Pack CREATED_FAST cell."""
+        if len(self.y) != SHA1_LEN:
+            raise ValueError(f"y must be {SHA1_LEN} bytes")
+        if len(self.kh) != SHA1_LEN:
+            raise ValueError(f"kh must be {SHA1_LEN} bytes")
+
+        payload = self.y + self.kh
+        cell = Cell(circ_id=self.circ_id, command=CellCommand.CREATED_FAST, payload=payload)
+        return cell.pack(link_protocol)
+
+    @classmethod
+    def unpack(cls, data: bytes, link_protocol: int = 4) -> "CreatedFastCell":
+        """Unpack CREATED_FAST cell."""
+        cell = Cell.unpack(data, link_protocol)
+        payload = cell.payload
+
+        if len(payload) < SHA1_LEN * 2:
+            raise ValueError(f"CREATED_FAST payload too short: {len(payload)} < {SHA1_LEN * 2}")
+
+        y = payload[:SHA1_LEN]
+        kh = payload[SHA1_LEN : SHA1_LEN * 2]
+
+        return cls(circ_id=cell.circ_id, y=y, kh=kh)
+
+
 @dataclass
 class DestroyCell:
     """
@@ -501,3 +578,119 @@ class DestroyCell:
         cell = Cell.unpack(data, link_protocol)
         reason = cell.payload[0] if cell.payload else 0
         return cls(circ_id=cell.circ_id, reason=reason)
+
+
+# =============================================================================
+# KDF-TOR Key Derivation Function (for CREATE_FAST and legacy TAP handshake)
+# =============================================================================
+
+
+def kdf_tor(k0: bytes, key_len: int) -> bytes:
+    """
+    KDF-TOR key derivation function.
+
+    Generates a keystream using iterative SHA1:
+        K = SHA1(K0 | [00]) | SHA1(K0 | [01]) | SHA1(K0 | [02]) | ...
+
+    This KDF is obsolete for new handshakes but required for CREATE_FAST.
+
+    See: https://spec.torproject.org/tor-spec/setting-circuit-keys.html#kdf-tor
+
+    Args:
+        k0: Base key material (for CREATE_FAST: X | Y, 40 bytes)
+        key_len: Number of bytes to generate (max 5120)
+
+    Returns:
+        Derived key material
+
+    Raises:
+        ValueError: If key_len > 5120
+    """
+    import hashlib
+
+    max_len = SHA1_LEN * 256  # 5120 bytes
+    if key_len > max_len:
+        raise ValueError(f"KDF-TOR cannot generate more than {max_len} bytes")
+
+    result = b""
+    counter = 0
+
+    while len(result) < key_len:
+        # K = K0 | counter (1 byte)
+        h = hashlib.sha1(k0 + bytes([counter]))
+        result += h.digest()
+        counter += 1
+
+    return result[:key_len]
+
+
+@dataclass
+class FastCircuitKeys:
+    """
+    Circuit keys derived from CREATE_FAST handshake.
+
+    The KDF-TOR output is partitioned as:
+        KH: 20 bytes - derivative key hash (for verification)
+        Df: 20 bytes - forward digest seed
+        Db: 20 bytes - backward digest seed
+        Kf: 16 bytes - forward AES key
+        Kb: 16 bytes - backward AES key
+    """
+
+    kh: bytes  # Derivative key hash (20 bytes)
+    digest_forward: bytes  # Forward digest seed (20 bytes)
+    digest_backward: bytes  # Backward digest seed (20 bytes)
+    key_forward: bytes  # Forward AES-128 key (16 bytes)
+    key_backward: bytes  # Backward AES-128 key (16 bytes)
+
+    @classmethod
+    def from_key_material(cls, x: bytes, y: bytes) -> "FastCircuitKeys":
+        """
+        Derive circuit keys from CREATE_FAST key exchange.
+
+        Args:
+            x: Client's 20 random bytes
+            y: Server's 20 random bytes
+
+        Returns:
+            FastCircuitKeys with all derived keys
+        """
+        # K0 = X | Y
+        k0 = x + y
+
+        # Need: KH(20) + Df(20) + Db(20) + Kf(16) + Kb(16) = 92 bytes
+        total_len = SHA1_LEN * 3 + KEY_LEN * 2  # 92 bytes
+        derived = kdf_tor(k0, total_len)
+
+        offset = 0
+        kh = derived[offset : offset + SHA1_LEN]
+        offset += SHA1_LEN
+        df = derived[offset : offset + SHA1_LEN]
+        offset += SHA1_LEN
+        db = derived[offset : offset + SHA1_LEN]
+        offset += SHA1_LEN
+        kf = derived[offset : offset + KEY_LEN]
+        offset += KEY_LEN
+        kb = derived[offset : offset + KEY_LEN]
+
+        return cls(
+            kh=kh,
+            digest_forward=df,
+            digest_backward=db,
+            key_forward=kf,
+            key_backward=kb,
+        )
+
+    def verify(self, received_kh: bytes) -> bool:
+        """
+        Verify the derivative key hash matches what server sent.
+
+        Args:
+            received_kh: KH value from CREATED_FAST cell
+
+        Returns:
+            True if hashes match, False otherwise
+        """
+        import hmac
+
+        return hmac.compare_digest(self.kh, received_kh)

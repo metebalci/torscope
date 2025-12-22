@@ -865,3 +865,168 @@ def link_specifiers_from_intro_point(
             result.append(LinkSpecifier(spec_type=LinkSpecifierType.TLS_TCP_IPV4, data=data))
             result[-1].spec_type = spec_type  # type: ignore[assignment]
     return result
+
+
+# =============================================================================
+# Circuit Padding Negotiation
+# See: https://spec.torproject.org/padding-spec/circuit-level-padding.html
+# =============================================================================
+
+
+class CircpadCommand(IntEnum):
+    """Commands for PADDING_NEGOTIATE/PADDING_NEGOTIATED cells."""
+
+    STOP = 1  # Stop padding on the circuit
+    START = 2  # Start padding on the circuit
+
+
+class CircpadMachineType(IntEnum):
+    """Machine types for circuit padding."""
+
+    CIRC_SETUP = 1  # Circuit setup machine (for onion services)
+
+
+class CircpadResponse(IntEnum):
+    """Response codes for PADDING_NEGOTIATED cell."""
+
+    OK = 1  # Padding successfully negotiated
+    ERR = 2  # Padding negotiation failed
+
+
+@dataclass
+class PaddingNegotiate:
+    """
+    PADDING_NEGOTIATE relay cell payload.
+
+    Used to negotiate circuit padding parameters with a relay.
+
+    Format:
+        version      [1 byte]  - Must be 0
+        command      [1 byte]  - START (2) or STOP (1)
+        machine_type [1 byte]  - CIRC_SETUP (1)
+        unused       [1 byte]  - Formerly echo_request
+        machine_ctr  [4 bytes] - Machine instance counter
+    """
+
+    command: CircpadCommand
+    machine_type: CircpadMachineType = CircpadMachineType.CIRC_SETUP
+    machine_ctr: int = 0
+    version: int = 0
+
+    def pack(self) -> bytes:
+        """Pack PADDING_NEGOTIATE payload."""
+        return struct.pack(
+            ">BBBBI",
+            self.version,
+            self.command,
+            self.machine_type,
+            0,  # unused
+            self.machine_ctr,
+        )
+
+    @classmethod
+    def unpack(cls, payload: bytes) -> "PaddingNegotiate":
+        """Unpack PADDING_NEGOTIATE payload."""
+        if len(payload) < 8:
+            raise ValueError(f"PADDING_NEGOTIATE payload too short: {len(payload)} < 8")
+
+        version, command, machine_type, _, machine_ctr = struct.unpack(">BBBBI", payload[:8])
+
+        return cls(
+            version=version,
+            command=CircpadCommand(command),
+            machine_type=CircpadMachineType(machine_type),
+            machine_ctr=machine_ctr,
+        )
+
+
+@dataclass
+class PaddingNegotiated:
+    """
+    PADDING_NEGOTIATED relay cell payload.
+
+    Response to PADDING_NEGOTIATE from the relay.
+
+    Format:
+        version      [1 byte]  - Must be 0
+        command      [1 byte]  - START (2) or STOP (1)
+        response     [1 byte]  - OK (1) or ERR (2)
+        machine_type [1 byte]  - CIRC_SETUP (1)
+        machine_ctr  [4 bytes] - Machine instance counter
+    """
+
+    command: CircpadCommand
+    response: CircpadResponse
+    machine_type: CircpadMachineType = CircpadMachineType.CIRC_SETUP
+    machine_ctr: int = 0
+    version: int = 0
+
+    def pack(self) -> bytes:
+        """Pack PADDING_NEGOTIATED payload."""
+        return struct.pack(
+            ">BBBBI",
+            self.version,
+            self.command,
+            self.response,
+            self.machine_type,
+            self.machine_ctr,
+        )
+
+    @classmethod
+    def unpack(cls, payload: bytes) -> "PaddingNegotiated":
+        """Unpack PADDING_NEGOTIATED payload."""
+        if len(payload) < 8:
+            raise ValueError(f"PADDING_NEGOTIATED payload too short: {len(payload)} < 8")
+
+        version, command, response, machine_type, machine_ctr = struct.unpack(">BBBBI", payload[:8])
+
+        return cls(
+            version=version,
+            command=CircpadCommand(command),
+            response=CircpadResponse(response),
+            machine_type=CircpadMachineType(machine_type),
+            machine_ctr=machine_ctr,
+        )
+
+    @property
+    def is_ok(self) -> bool:
+        """Check if padding was successfully negotiated."""
+        return self.response == CircpadResponse.OK
+
+
+def create_padding_negotiate_payload(
+    command: CircpadCommand,
+    machine_type: CircpadMachineType = CircpadMachineType.CIRC_SETUP,
+    machine_ctr: int = 0,
+) -> bytes:
+    """Create payload for RELAY_PADDING_NEGOTIATE cell.
+
+    Args:
+        command: STOP or START
+        machine_type: Type of padding machine (default: CIRC_SETUP)
+        machine_ctr: Machine instance counter (default: 0)
+
+    Returns:
+        8-byte PADDING_NEGOTIATE payload
+    """
+    negotiate = PaddingNegotiate(
+        command=command,
+        machine_type=machine_type,
+        machine_ctr=machine_ctr,
+    )
+    return negotiate.pack()
+
+
+def parse_padding_negotiated_payload(payload: bytes) -> PaddingNegotiated:
+    """Parse RELAY_PADDING_NEGOTIATED payload.
+
+    Args:
+        payload: PADDING_NEGOTIATED cell payload
+
+    Returns:
+        PaddingNegotiated object
+
+    Raises:
+        ValueError: If payload is too short or invalid
+    """
+    return PaddingNegotiated.unpack(payload)
