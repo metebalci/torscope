@@ -1405,7 +1405,10 @@ def _send_and_receive(
         if http_get_path:
             request_bytes = (
                 f"GET {http_get_path} HTTP/1.1\r\n"
-                f"Host: {target_addr}\r\nConnection: close\r\n\r\n"
+                f"Host: {target_addr}\r\n"
+                f"User-Agent: torscope/{__version__}\r\n"
+                f"Accept: */*\r\n"
+                f"Connection: close\r\n\r\n"
             ).encode("ascii")
         elif request_file == "-":
             # Read from stdin
