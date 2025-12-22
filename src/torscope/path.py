@@ -34,16 +34,23 @@ class PathSelectionResult:
     - 1-hop: guard only
     - 2-hop: guard + exit (no middle)
     - 3-hop: guard + middle + exit
+
+    For bridge mode:
+    - guard is None (bridge is used instead, handled separately)
+    - 2-hop: exit only
+    - 3-hop: middle + exit
     """
 
-    guard: RouterStatusEntry
+    guard: RouterStatusEntry | None = None  # None when using bridge
     middle: RouterStatusEntry | None = None  # None for 1-hop and 2-hop circuits
     exit: RouterStatusEntry | None = None  # None for 1-hop circuits
 
     @property
     def hops(self) -> int:
-        """Number of hops in the path."""
-        count = 1  # Always have guard
+        """Number of hops in the path (not counting bridge)."""
+        count = 0
+        if self.guard is not None:
+            count += 1
         if self.middle is not None:
             count += 1
         if self.exit is not None:
@@ -53,7 +60,9 @@ class PathSelectionResult:
     @property
     def routers(self) -> list[RouterStatusEntry]:
         """List of routers in path order (guard, [middle], [exit])."""
-        result = [self.guard]
+        result: list[RouterStatusEntry] = []
+        if self.guard is not None:
+            result.append(self.guard)
         if self.middle is not None:
             result.append(self.middle)
         if self.exit is not None:
@@ -63,7 +72,9 @@ class PathSelectionResult:
     @property
     def roles(self) -> list[str]:
         """List of role names corresponding to routers."""
-        result = ["Guard"]
+        result: list[str] = []
+        if self.guard is not None:
+            result.append("Guard")
         if self.middle is not None:
             result.append("Middle")
         if self.exit is not None:
@@ -173,6 +184,77 @@ class PathSelector:
             output.verbose(f"Using specified middle: {middle.nickname}")
 
         return PathSelectionResult(guard=guard, middle=middle, exit=exit_router)
+
+    def select_path_for_bridge(
+        self,
+        num_hops: int = 3,
+        target_port: int | None = None,
+        bridge_ip: str | None = None,
+        bridge_fingerprint: str | None = None,
+        exit_router: RouterStatusEntry | None = None,
+    ) -> PathSelectionResult:
+        """
+        Select path components for use with a bridge.
+
+        When using a bridge, the bridge acts as the first hop.
+        This method selects the remaining hops (middle and/or exit).
+
+        Args:
+            num_hops: Total number of hops including bridge (2 or 3)
+            target_port: Target port for exit selection (filters by exit policy)
+            bridge_ip: Bridge IP address (for subnet exclusion)
+            bridge_fingerprint: Bridge fingerprint (for fingerprint exclusion)
+            exit_router: Pre-selected exit router (optional)
+
+        Returns:
+            PathSelectionResult with guard=None and middle/exit selected
+
+        Raises:
+            ValueError: If no suitable routers found or invalid configuration
+        """
+        if num_hops < 2 or num_hops > 3:
+            raise ValueError("num_hops must be 2 or 3 when using a bridge")
+
+        output.debug(f"Selecting {num_hops - 1} hops after bridge, target_port={target_port}")
+
+        excluded_fps: set[str] = set()
+        excluded_subnets: set[str] = set()
+        excluded_families: set[str] = set()
+
+        # Exclude bridge from selection
+        if bridge_fingerprint:
+            excluded_fps.add(bridge_fingerprint.upper())
+        if bridge_ip:
+            excluded_subnets.add(self._get_ipv4_subnet(bridge_ip))
+
+        # Select or validate exit
+        if exit_router is None:
+            exit_router = self._select_router(
+                "exit",
+                excluded_fps=excluded_fps,
+                excluded_subnets=excluded_subnets,
+                excluded_families=excluded_families,
+                target_port=target_port,
+            )
+            output.verbose(f"Selected exit: {exit_router.nickname}")
+        else:
+            output.verbose(f"Using specified exit: {exit_router.nickname}")
+        self._add_exclusions(exit_router, excluded_fps, excluded_subnets, excluded_families)
+
+        if num_hops == 2:
+            # Bridge + Exit (no middle)
+            return PathSelectionResult(guard=None, exit=exit_router)
+
+        # Select middle (for 3-hop)
+        middle = self._select_router(
+            "middle",
+            excluded_fps=excluded_fps,
+            excluded_subnets=excluded_subnets,
+            excluded_families=excluded_families,
+        )
+        output.verbose(f"Selected middle: {middle.nickname}")
+
+        return PathSelectionResult(guard=None, middle=middle, exit=exit_router)
 
     def _select_router(
         self,

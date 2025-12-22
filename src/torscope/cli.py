@@ -21,6 +21,7 @@ from torscope.cache import (
 )
 from torscope.cli_helpers import find_router, parse_address_port
 from torscope.directory.authority import get_authorities
+from torscope.directory.bridge import BridgeParseError, parse_bridge_line
 from torscope.directory.certificates import KeyCertificateParser
 from torscope.directory.client import DirectoryClient
 from torscope.directory.client_auth import parse_client_auth_key, read_client_auth_file
@@ -555,10 +556,34 @@ def cmd_circuit(args: argparse.Namespace) -> int:
     """Build a Tor circuit (1-3 hops)."""
     try:
         output.explain("Building a Tor circuit through multiple relays")
-        consensus = get_consensus()
 
         num_hops = args.hops
         output.verbose(f"Circuit will have {num_hops} hop(s)")
+
+        # Check for bridge mode
+        bridge = None
+        if hasattr(args, "bridge") and args.bridge:
+            try:
+                bridge = parse_bridge_line(args.bridge)
+                output.verbose(f"Using bridge: {bridge.address} ({bridge.short_fingerprint})")
+                if bridge.transport:
+                    print(
+                        f"Error: Pluggable transport '{bridge.transport}' not yet supported",
+                        file=sys.stderr,
+                    )
+                    return 1
+                if num_hops < 2:
+                    print("Error: Bridge requires at least 2 hops", file=sys.stderr)
+                    return 1
+                if args.guard:
+                    print("Error: Cannot specify both --bridge and --guard", file=sys.stderr)
+                    return 1
+            except BridgeParseError as e:
+                print(f"Error parsing bridge: {e}", file=sys.stderr)
+                return 1
+
+        # Get consensus (needed for middle/exit selection)
+        consensus = get_consensus()
 
         # Resolve pre-specified routers
         exit_spec = vars(args).get("exit")  # 'exit' is a builtin name
@@ -566,7 +591,7 @@ def cmd_circuit(args: argparse.Namespace) -> int:
         middle = None
         exit_router = None
 
-        if args.guard:
+        if not bridge and args.guard:
             guard = find_router(consensus, args.guard.strip())
             if guard is None:
                 print(f"Guard router not found: {args.guard}", file=sys.stderr)
@@ -584,26 +609,43 @@ def cmd_circuit(args: argparse.Namespace) -> int:
                 print(f"Exit router not found: {exit_spec}", file=sys.stderr)
                 return 1
 
-        # Use PathSelector for bandwidth-weighted selection with exclusions
+        # Path selection
         output.explain("Selecting path through the network (bandwidth-weighted)")
         selector = PathSelector(consensus=consensus)
-        try:
-            path = selector.select_path(
-                num_hops=num_hops,
-                target_port=args.port,
-                guard=guard,
-                middle=middle,
-                exit_router=exit_router,
-            )
-        except ValueError as e:
-            print(f"Path selection failed: {e}", file=sys.stderr)
-            return 1
+
+        if bridge:
+            # Bridge mode: select middle/exit only
+            try:
+                path = selector.select_path_for_bridge(
+                    num_hops=num_hops,
+                    target_port=args.port,
+                    bridge_ip=bridge.ip,
+                    bridge_fingerprint=bridge.fingerprint,
+                    exit_router=exit_router,
+                )
+            except ValueError as e:
+                print(f"Path selection failed: {e}", file=sys.stderr)
+                return 1
+        else:
+            # Normal mode: select guard/middle/exit
+            try:
+                path = selector.select_path(
+                    num_hops=num_hops,
+                    target_port=args.port,
+                    guard=guard,
+                    middle=middle,
+                    exit_router=exit_router,
+                )
+            except ValueError as e:
+                print(f"Path selection failed: {e}", file=sys.stderr)
+                return 1
 
         routers = path.routers
         roles = path.roles
-        output.verbose(f"Selected path: {' → '.join(r.nickname for r in routers)}")
+        if routers:
+            output.verbose(f"Selected path: {' → '.join(r.nickname for r in routers)}")
 
-        # Fetch ntor keys for all routers
+        # Fetch ntor keys for all routers (not bridge - we'll use CREATE_FAST)
         ntor_keys = []
         for router in routers:
             result = get_ntor_key(router, consensus)
@@ -625,22 +667,38 @@ def cmd_circuit(args: argparse.Namespace) -> int:
             else:
                 print(f"{action} {router.nickname}'s microdescriptor from cache", file=sys.stderr)
 
+        # Display path info
         print(f"\nBuilding {num_hops}-hop circuit:")
-        for i, (role, r) in enumerate(zip(roles, routers, strict=True)):
-            print(f"  [{i+1}] {role}: {r.nickname} ({r.ip}:{r.orport})")
+        hop_num = 1
+        if bridge:
+            print(f"  [{hop_num}] Bridge: {bridge.address} ({bridge.short_fingerprint}...)")
+            hop_num += 1
+        for role, r in zip(roles, routers, strict=True):
+            print(f"  [{hop_num}] {role}: {r.nickname} ({r.ip}:{r.orport})")
+            hop_num += 1
 
-        # Connect to first router
-        first_router = routers[0]
-        output.explain("Establishing TLS connection to guard relay")
-        print(f"\nConnecting to {first_router.nickname}...")
-        conn = RelayConnection(
-            host=first_router.ip, port=first_router.orport, timeout=get_timeout()
-        )
+        # Connect and build circuit
+        if bridge:
+            # Bridge mode: connect to bridge first
+            output.explain("Establishing TLS connection to bridge relay")
+            print(f"\nConnecting to bridge {bridge.address}...")
+            conn = RelayConnection(host=bridge.ip, port=bridge.port, timeout=get_timeout())
+        else:
+            # Normal mode: connect to first router
+            first_router = routers[0]
+            output.explain("Establishing TLS connection to guard relay")
+            print(f"\nConnecting to {first_router.nickname}...")
+            conn = RelayConnection(
+                host=first_router.ip, port=first_router.orport, timeout=get_timeout()
+            )
 
         try:
             conn.connect()
             print("  TLS connection established")
-            output.verbose(f"TLS connected to {first_router.ip}:{first_router.orport}")
+            if bridge:
+                output.verbose(f"TLS connected to bridge {bridge.ip}:{bridge.port}")
+            else:
+                output.verbose(f"TLS connected to {routers[0].ip}:{routers[0].orport}")
 
             output.explain("Performing link protocol handshake")
             if not conn.handshake():
@@ -649,27 +707,28 @@ def cmd_circuit(args: argparse.Namespace) -> int:
             print(f"  Link protocol: v{conn.link_protocol}")
             output.verbose(f"Link protocol version: {conn.link_protocol}")
 
-            # Create circuit and extend through all hops
+            # Create circuit
             circuit = Circuit.create(conn)
             print(f"  Circuit ID: {circuit.circ_id:#010x}")
             output.debug(f"Circuit ID: {circuit.circ_id:#010x}")
 
-            for i, (router, ntor_key) in enumerate(zip(routers, ntor_keys, strict=True)):
-                if i == 0:
-                    # First hop - use CREATE2
-                    output.explain("Performing ntor handshake with guard relay")
-                    print(f"\n  Hop {i+1}: Creating circuit to {router.nickname}...")
-                    output.verbose(f"CREATE2 → {router.nickname}")
-                    output.debug(f"ntor-onion-key: {ntor_key.hex()}")
-                    if not circuit.extend_to(router.fingerprint, ntor_key):
-                        print("    CREATE2 failed", file=sys.stderr)
-                        return 1
-                    print("    CREATE2/CREATED2 successful")
-                    output.verbose(f"CREATED2 ← {router.nickname}")
-                else:
-                    # Subsequent hops - use RELAY_EXTEND2
-                    output.explain(f"Extending circuit to {'middle' if i == 1 else 'exit'} relay")
-                    print(f"\n  Hop {i+1}: Extending to {router.nickname}...")
+            # Build first hop
+            if bridge:
+                # Bridge mode: use CREATE_FAST for bridge (no ntor key needed)
+                output.explain("Creating circuit to bridge using CREATE_FAST")
+                print("\n  Hop 1: Creating circuit to bridge...")
+                output.verbose("CREATE_FAST → bridge")
+                if not circuit.create_fast(bridge.fingerprint):
+                    print("    CREATE_FAST failed", file=sys.stderr)
+                    return 1
+                print("    CREATE_FAST/CREATED_FAST successful")
+                output.verbose("CREATED_FAST ← bridge")
+
+                # Extend to remaining hops
+                for i, (router, ntor_key) in enumerate(zip(routers, ntor_keys, strict=True)):
+                    role = "middle" if i == 0 and len(routers) > 1 else "exit"
+                    output.explain(f"Extending circuit to {role} relay")
+                    print(f"\n  Hop {i+2}: Extending to {router.nickname}...")
                     output.verbose(f"RELAY_EXTEND2 → {router.nickname}")
                     output.debug(f"ntor-onion-key: {ntor_key.hex()}")
                     if not circuit.extend_to(
@@ -679,6 +738,34 @@ def cmd_circuit(args: argparse.Namespace) -> int:
                         return 1
                     print("    RELAY_EXTEND2/EXTENDED2 successful")
                     output.verbose(f"EXTENDED2 ← {router.nickname}")
+            else:
+                # Normal mode: use CREATE2/EXTEND2
+                for i, (router, ntor_key) in enumerate(zip(routers, ntor_keys, strict=True)):
+                    if i == 0:
+                        # First hop - use CREATE2
+                        output.explain("Performing ntor handshake with guard relay")
+                        print(f"\n  Hop {i+1}: Creating circuit to {router.nickname}...")
+                        output.verbose(f"CREATE2 → {router.nickname}")
+                        output.debug(f"ntor-onion-key: {ntor_key.hex()}")
+                        if not circuit.extend_to(router.fingerprint, ntor_key):
+                            print("    CREATE2 failed", file=sys.stderr)
+                            return 1
+                        print("    CREATE2/CREATED2 successful")
+                        output.verbose(f"CREATED2 ← {router.nickname}")
+                    else:
+                        # Subsequent hops - use RELAY_EXTEND2
+                        role = "middle" if i == 1 and num_hops == 3 else "exit"
+                        output.explain(f"Extending circuit to {role} relay")
+                        print(f"\n  Hop {i+1}: Extending to {router.nickname}...")
+                        output.verbose(f"RELAY_EXTEND2 → {router.nickname}")
+                        output.debug(f"ntor-onion-key: {ntor_key.hex()}")
+                        if not circuit.extend_to(
+                            router.fingerprint, ntor_key, ip=router.ip, port=router.orport
+                        ):
+                            print("    EXTEND2 failed", file=sys.stderr)
+                            return 1
+                        print("    RELAY_EXTEND2/EXTENDED2 successful")
+                        output.verbose(f"EXTENDED2 ← {router.nickname}")
 
             print(f"\n  Circuit built with {len(circuit.hops)} hops!")
 
@@ -688,6 +775,9 @@ def cmd_circuit(args: argparse.Namespace) -> int:
                 if hop.keys:
                     kf = hop.keys.key_forward.hex()[:8]
                     print(f"    [{i+1}] {hop.fingerprint[:16]}... Kf={kf}...")
+                else:
+                    # CREATE_FAST doesn't use CircuitKeys, just print fingerprint
+                    print(f"    [{i+1}] {hop.fingerprint[:16]}... (CREATE_FAST)")
 
             # Clean up
             circuit.destroy()
@@ -1652,6 +1742,11 @@ def main() -> int:
     circuit_parser.add_argument(
         "--port", type=int, metavar="PORT", help="Target port (filters exits)"
     )
+    circuit_parser.add_argument(
+        "--bridge",
+        metavar="'IP:PORT FP'",
+        help="Bridge relay to use as first hop (format: 'IP:PORT FINGERPRINT')",
+    )
 
     # open-stream command
     stream_parser = subparsers.add_parser(
@@ -1685,12 +1780,22 @@ def main() -> int:
     stream_parser.add_argument(
         "--auth-key", metavar="KEY", help="Client auth key (onion only, for testing)"
     )
+    stream_parser.add_argument(
+        "--bridge",
+        metavar="'IP:PORT FP'",
+        help="Bridge relay to use as first hop (format: 'IP:PORT FINGERPRINT')",
+    )
 
     # resolve command
     resolve_parser = subparsers.add_parser(
         "resolve", help="Resolve hostname through Tor network (DNS)"
     )
     resolve_parser.add_argument("hostname", metavar="HOSTNAME", help="Hostname to resolve")
+    resolve_parser.add_argument(
+        "--bridge",
+        metavar="'IP:PORT FP'",
+        help="Bridge relay to use as first hop (format: 'IP:PORT FINGERPRINT')",
+    )
 
     args = parser.parse_args()
 

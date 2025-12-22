@@ -864,6 +864,88 @@ class Circuit:
             print(f"    [debug] Unexpected relay command: {response.relay_command.name}")
         return None
 
+    def fetch_directory(self, path: str, timeout: float = 30.0) -> bytes | None:
+        """
+        Fetch a directory document through a BEGIN_DIR stream.
+
+        Opens a directory stream to the relay, sends an HTTP GET request,
+        and returns the response body. Used for fetching descriptors,
+        consensus, etc. through bridges.
+
+        Args:
+            path: HTTP path to fetch (e.g., "/tor/server/fp/FINGERPRINT")
+            timeout: Timeout in seconds for the entire operation
+
+        Returns:
+            Response body as bytes, or None if failed
+        """
+        # Open directory stream
+        stream_id = self.begin_dir()
+        if stream_id is None:
+            output.debug("Failed to open directory stream")
+            return None
+
+        try:
+            # Send HTTP GET request
+            request = (
+                f"GET {path} HTTP/1.0\r\n"
+                f"Host: 127.0.0.1\r\n"
+                f"Accept-Encoding: identity\r\n"
+                f"\r\n"
+            ).encode("ascii")
+
+            output.debug(f"Sending HTTP request: GET {path}")
+            self.send_data(stream_id, request)
+
+            # Receive response
+            response_data = b""
+            start_time = time.time()
+
+            while True:
+                if time.time() - start_time > timeout:
+                    output.debug("Directory fetch timeout")
+                    break
+
+                chunk = self.recv_data(stream_id)
+                if chunk is None:
+                    # Stream ended or error
+                    break
+                response_data += chunk
+
+            if not response_data:
+                output.debug("No response data received")
+                return None
+
+            # Parse HTTP response
+            try:
+                header_end = response_data.find(b"\r\n\r\n")
+                if header_end == -1:
+                    output.debug("Invalid HTTP response (no header terminator)")
+                    return None
+
+                headers = response_data[:header_end].decode("ascii", errors="replace")
+                body = response_data[header_end + 4 :]
+
+                # Check status code
+                first_line = headers.split("\r\n")[0]
+                if " 200 " not in first_line:
+                    output.debug(f"HTTP error: {first_line}")
+                    return None
+
+                output.debug(f"Received {len(body)} bytes of directory data")
+                return body
+
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                output.debug(f"Failed to parse HTTP response: {e}")
+                return None
+
+        finally:
+            # Close stream
+            try:
+                self.end_stream(stream_id)
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+
     def __enter__(self) -> "Circuit":
         """Context manager entry."""
         return self

@@ -7,6 +7,14 @@ from torscope.directory.authority import (
     get_random_authority,
     get_shuffled_authorities,
 )
+from torscope.directory.bridge import (
+    BridgeParseError,
+    BridgeRelay,
+    connect_to_bridge,
+    fetch_bridge_descriptor,
+    get_bridge_ntor_key,
+    parse_bridge_line,
+)
 from torscope.directory.certificates import KeyCertificateParser
 from torscope.directory.client import DirectoryClient
 from torscope.directory.consensus import ConsensusParser
@@ -39,6 +47,12 @@ __all__ = [
     "get_authority_by_nickname",
     "get_random_authority",
     "get_shuffled_authorities",
+    "BridgeParseError",
+    "BridgeRelay",
+    "connect_to_bridge",
+    "fetch_bridge_descriptor",
+    "get_bridge_ntor_key",
+    "parse_bridge_line",
     "FallbackDirectory",
     "get_fallbacks",
     "get_random_fallback",
