@@ -82,9 +82,6 @@ It implements the Tor directory protocol and OR (Onion Router) protocol, allowin
 
 ## Not Implemented
 
-### Protocol Features
-- Pluggable transports: Snowflake
-
 ### Other
 - REST API
 
@@ -94,7 +91,7 @@ It implements the Tor directory protocol and OR (Onion Router) protocol, allowin
 - Control protocol (stem-like interface)
 - Connection pooling/reuse
 - Onion service publication (server-side)
-- Pluggable transports: meek
+- Pluggable transports: meek, Snowflake (require external dependencies like WebRTC/CDN)
 - XOFF/XON congestion control (sender-side mechanism, not needed for receiving)
 - RTT-based congestion control (Proposal 324, sender-side performance optimization)
 - Conflux (multi-path circuits, performance optimization)
