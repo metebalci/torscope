@@ -903,52 +903,6 @@ def cmd_circuit(args: argparse.Namespace) -> int:
                     # CREATE_FAST doesn't use CircuitKeys, just print fingerprint
                     print(f"    [{i+1}] {hop.fingerprint[:16]}... (CREATE_FAST)")
 
-            # Handle padding if requested
-            drop_strategy = None
-            vpadding_strategy = None
-
-            if getattr(args, "with_drop", None):
-                try:
-                    drop_strategy = PaddingStrategy.parse(args.with_drop)
-                    print(f"\n  DROP padding: {drop_strategy.count} cells", end="")
-                    if drop_strategy.interval_ms > 0:
-                        print(f" ({drop_strategy.interval_ms}ms interval)")
-                    else:
-                        print()
-                except ValueError as e:
-                    print(f"\n  Invalid --with-drop: {e}", file=sys.stderr)
-                    circuit.destroy()
-                    return 1
-
-            if getattr(args, "with_vpadding", None):
-                try:
-                    vpadding_strategy = PaddingStrategy.parse(args.with_vpadding)
-                    print(f"  VPADDING padding: {vpadding_strategy.count} cells", end="")
-                    if vpadding_strategy.interval_ms > 0:
-                        print(f" ({vpadding_strategy.interval_ms}ms interval)")
-                    else:
-                        print()
-                except ValueError as e:
-                    print(f"\n  Invalid --with-vpadding: {e}", file=sys.stderr)
-                    circuit.destroy()
-                    return 1
-
-            if drop_strategy or vpadding_strategy:
-                print("\n  Sending padding cells...")
-                stop_event = threading.Event()
-                padding_thread = threading.Thread(
-                    target=_run_padding_loop,
-                    args=(circuit, conn, drop_strategy, vpadding_strategy, stop_event),
-                    daemon=True,
-                )
-                padding_thread.start()
-                padding_thread.join(timeout=30.0)  # Wait up to 30 seconds
-                stop_event.set()  # Signal to stop if still running
-                if padding_thread.is_alive():
-                    print("  Padding timeout, stopping...")
-                    padding_thread.join(timeout=1.0)
-                print("  Padding complete")
-
             # Clean up
             circuit.destroy()
             print("\n  Circuit destroyed")
@@ -2051,16 +2005,6 @@ def main() -> int:
         "--bridge",
         metavar="'IP:PORT FP'",
         help="Bridge relay to use as first hop (format: 'IP:PORT FINGERPRINT')",
-    )
-    circuit_parser.add_argument(
-        "--with-drop",
-        metavar="STRATEGY",
-        help="Send DROP cells (long-range padding). Format: count:N[,INTERVAL_MS]",
-    )
-    circuit_parser.add_argument(
-        "--with-vpadding",
-        metavar="STRATEGY",
-        help="Send VPADDING cells (link padding). Format: count:N[,INTERVAL_MS]",
     )
 
     # open-stream command
