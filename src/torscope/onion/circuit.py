@@ -510,6 +510,8 @@ class Circuit:
         For multi-hop circuits, decrypts with each hop's key in order
         (first hop first, then middle, then last).
 
+        DROP cells (long-range dummy traffic) are logged and skipped.
+
         Args:
             debug: If True, print debug info
 
@@ -521,88 +523,103 @@ class Circuit:
         if not self._crypto_layers:
             raise RuntimeError("Circuit crypto not initialized")
 
-        # Receive cell (skip PADDING cells, with timeout)
+        # Receive cell (skip PADDING and DROP cells, with timeout)
         start_time = time.time()
         timeout = self.connection.timeout
+
         while True:
             # Check if we've exceeded the connection timeout
             if time.time() - start_time > timeout:
-                raise TimeoutError("Timeout while waiting for non-PADDING cell")
+                raise TimeoutError("Timeout while waiting for relay cell")
 
             cell = self.connection.recv_cell()
 
-            # PADDING cells should be silently ignored
+            # PADDING cells (link-level) should be silently ignored
             if cell.command == CellCommand.PADDING:
                 output.debug("Received PADDING cell, skipping")
                 continue
 
+            # VPADDING cells (variable-length link padding) should be logged and skipped
+            if cell.command == CellCommand.VPADDING:
+                output.debug(f"Received VPADDING cell ({len(cell.payload)} bytes), skipping")
+                continue
+
             if debug:
                 print(f"    [debug] Received cell: cmd={cell.command.name}")
-            break
 
-        if cell.command == CellCommand.DESTROY:
-            reason = cell.payload[0] if cell.payload else 0
-            reason_names = {
-                0: "NONE",
-                1: "PROTOCOL",
-                2: "INTERNAL",
-                3: "REQUESTED",
-                4: "HIBERNATING",
-                5: "RESOURCELIMIT",
-                6: "CONNECTFAILED",
-                7: "OR_IDENTITY",
-                8: "CHANNEL_CLOSED",
-                9: "FINISHED",
-                10: "TIMEOUT",
-                11: "DESTROYED",
-                12: "NOSUCHSERVICE",
-            }
-            if debug:
-                print(
-                    f"    [debug] DESTROY reason: {reason} ({reason_names.get(reason, 'UNKNOWN')})"
-                )
-            self.state = CircuitState.CLOSED
-            return None
-
-        if cell.command not in (CellCommand.RELAY, CellCommand.RELAY_EARLY):
-            # Unexpected cell type
-            if debug:
-                print(f"    [debug] Unexpected cell type: {cell.command.name}")
-            return None
-
-        # Decrypt through each layer in order (first hop first)
-        # Each relay on the return path encrypted with its key,
-        # so we decrypt in the same order they encrypted.
-        payload = cell.payload[:RELAY_BODY_LEN]
-
-        if debug:
-            print(f"    [debug] Decrypting through {len(self._crypto_layers)} layers")
-
-        for i, layer in enumerate(self._crypto_layers):
-            # For all but the last layer, just decrypt raw
-            if i < len(self._crypto_layers) - 1:
-                payload = layer.decrypt_raw(payload)
+            if cell.command == CellCommand.DESTROY:
+                reason = cell.payload[0] if cell.payload else 0
+                reason_names = {
+                    0: "NONE",
+                    1: "PROTOCOL",
+                    2: "INTERNAL",
+                    3: "REQUESTED",
+                    4: "HIBERNATING",
+                    5: "RESOURCELIMIT",
+                    6: "CONNECTFAILED",
+                    7: "OR_IDENTITY",
+                    8: "CHANNEL_CLOSED",
+                    9: "FINISHED",
+                    10: "TIMEOUT",
+                    11: "DESTROYED",
+                    12: "NOSUCHSERVICE",
+                }
                 if debug:
-                    recognized = (payload[1] << 8) | payload[2]
-                    print(f"    [debug] After layer {i}: recognized={recognized}")
-            else:
-                # Last layer - check digest and parse
-                result = layer.decrypt_backward(payload)
+                    print(
+                        f"    [debug] DESTROY reason: {reason} "
+                        f"({reason_names.get(reason, 'UNKNOWN')})"
+                    )
+                self.state = CircuitState.CLOSED
+                return None
+
+            if cell.command not in (CellCommand.RELAY, CellCommand.RELAY_EARLY):
+                # Unexpected cell type
                 if debug:
-                    if result is None:
+                    print(f"    [debug] Unexpected cell type: {cell.command.name}")
+                return None
+
+            # Decrypt through each layer in order (first hop first)
+            # Each relay on the return path encrypted with its key,
+            # so we decrypt in the same order they encrypted.
+            payload = cell.payload[:RELAY_BODY_LEN]
+
+            if debug:
+                print(f"    [debug] Decrypting through {len(self._crypto_layers)} layers")
+
+            result = None
+            for i, layer in enumerate(self._crypto_layers):
+                # For all but the last layer, just decrypt raw
+                if i < len(self._crypto_layers) - 1:
+                    payload = layer.decrypt_raw(payload)
+                    if debug:
                         recognized = (payload[1] << 8) | payload[2]
-                        print(f"    [debug] Layer {i} failed (recognized={recognized})")
-                    else:
-                        cmd = result.relay_command.name
-                        print(f"    [debug] Layer {i} decrypt_backward OK: {cmd}")
+                        print(f"    [debug] After layer {i}: recognized={recognized}")
+                else:
+                    # Last layer - check digest and parse
+                    result = layer.decrypt_backward(payload)
+                    if debug:
+                        if result is None:
+                            recognized = (payload[1] << 8) | payload[2]
+                            print(f"    [debug] Layer {i} failed (recognized={recognized})")
+                        else:
+                            cmd = result.relay_command.name
+                            print(f"    [debug] Layer {i} decrypt_backward OK: {cmd}")
 
-                # Flow control: track windows and send SENDMEs for DATA cells
-                if result is not None and result.relay_command == RelayCommand.DATA:
-                    self._handle_data_flow_control(result, layer, debug)
+            # Handle decrypted relay cell
+            if result is None:
+                return None
 
-                return result
+            # DROP cells (long-range dummy traffic) should be logged and skipped
+            if result.relay_command == RelayCommand.DROP:
+                output.debug("Received DROP cell (long-range dummy traffic), discarding")
+                continue
 
-        return None
+            # Flow control: track windows and send SENDMEs for DATA cells
+            if result.relay_command == RelayCommand.DATA:
+                # Use last layer (the one that successfully decrypted the cell)
+                self._handle_data_flow_control(result, self._crypto_layers[-1], debug)
+
+            return result
 
     def _handle_data_flow_control(
         self, data_cell: RelayCell, crypto_layer: RelayCrypto, debug: bool = False
@@ -949,6 +966,37 @@ class Circuit:
                 print(f"    [debug] Sending DATA: stream={stream_id} len={len(chunk)}")
             self.send_relay(data_cell)
             offset += RELAY_DATA_LEN
+
+    def send_drop(self, padding_data: bytes | None = None) -> None:
+        """
+        Send a DROP cell (long-range dummy traffic).
+
+        DROP cells are RELAY cells that travel through the circuit like normal
+        relay cells but are discarded by the exit relay. They are used for
+        traffic padding to defeat traffic analysis.
+
+        Args:
+            padding_data: Optional padding data. If None, random data is used.
+
+        See: https://spec.torproject.org/tor-spec/relay-cells.html
+        """
+        if not self.is_open:
+            raise RuntimeError("Circuit is not open")
+
+        # Generate random padding if not provided
+        if padding_data is None:
+            padding_data = secrets.token_bytes(RELAY_DATA_LEN)
+        else:
+            # Truncate or pad to RELAY_DATA_LEN
+            padding_data = padding_data[:RELAY_DATA_LEN]
+
+        drop_cell = RelayCell(
+            relay_command=RelayCommand.DROP,
+            stream_id=0,  # DROP cells use stream_id=0 (no stream association)
+            data=padding_data,
+        )
+        self.send_relay(drop_cell)
+        output.debug("Sent DROP cell (long-range dummy traffic)")
 
     def recv_data(self, stream_id: int, debug: bool = False) -> bytes | None:
         """

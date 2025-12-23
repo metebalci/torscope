@@ -6,8 +6,11 @@ Provides command-line tools for exploring the Tor network.
 
 import argparse
 import sys
+import threading
+import time
 import traceback
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import httpx
 
@@ -55,6 +58,119 @@ _timeout: float = DEFAULT_TIMEOUT
 def get_timeout() -> float:
     """Get timeout from --timeout flag or default."""
     return _timeout
+
+
+@dataclass
+class PaddingStrategy:
+    """Parsed padding strategy from CLI."""
+
+    strategy: str  # e.g., "count"
+    count: int = 0  # Number of cells to send
+    interval_ms: int = 0  # Interval between cells in milliseconds
+
+    @classmethod
+    def parse(cls, value: str) -> "PaddingStrategy":
+        """
+        Parse a padding strategy string.
+
+        Formats:
+            count:N           - Send N cells as fast as possible
+            count:N,INTERVAL  - Send N cells with INTERVAL ms between each
+
+        Args:
+            value: Strategy string (e.g., "count:10" or "count:10,50")
+
+        Returns:
+            PaddingStrategy instance
+
+        Raises:
+            ValueError: If format is invalid
+        """
+        if ":" not in value:
+            raise ValueError(f"Invalid padding strategy format: {value} (expected STRATEGY:PARAMS)")
+
+        strategy, params = value.split(":", 1)
+
+        if strategy != "count":
+            raise ValueError(f"Unknown padding strategy: {strategy} (only 'count' is supported)")
+
+        parts = params.split(",")
+        if len(parts) == 1:
+            # count:N
+            try:
+                count = int(parts[0])
+            except ValueError as e:
+                raise ValueError(f"Invalid count: {parts[0]}") from e
+            return cls(strategy="count", count=count, interval_ms=0)
+        if len(parts) == 2:
+            # count:N,INTERVAL
+            try:
+                count = int(parts[0])
+                interval_ms = int(parts[1])
+            except ValueError as e:
+                raise ValueError(f"Invalid count or interval: {params}") from e
+            return cls(strategy="count", count=count, interval_ms=interval_ms)
+        raise ValueError(f"Invalid count format: {params} (expected N or N,INTERVAL)")
+
+
+def _run_padding_loop(
+    circuit: Circuit,
+    connection: RelayConnection,
+    drop_strategy: PaddingStrategy | None,
+    vpadding_strategy: PaddingStrategy | None,
+    stop_event: threading.Event,
+) -> None:
+    """
+    Run padding loop in a background thread.
+
+    Sends DROP and/or VPADDING cells according to the specified strategies.
+
+    Args:
+        circuit: Circuit for DROP cells (long-range padding)
+        connection: Connection for VPADDING cells (link padding)
+        drop_strategy: Strategy for DROP cells (or None)
+        vpadding_strategy: Strategy for VPADDING cells (or None)
+        stop_event: Event to signal when to stop
+    """
+    drop_count = 0
+    vpadding_count = 0
+    drop_target = drop_strategy.count if drop_strategy else 0
+    vpadding_target = vpadding_strategy.count if vpadding_strategy else 0
+    drop_interval = (drop_strategy.interval_ms / 1000.0) if drop_strategy else 0
+    vpadding_interval = (vpadding_strategy.interval_ms / 1000.0) if vpadding_strategy else 0
+
+    while not stop_event.is_set():
+        # Check if we're done
+        drop_done = drop_count >= drop_target
+        vpadding_done = vpadding_count >= vpadding_target
+        if drop_done and vpadding_done:
+            break
+
+        # Send DROP cell if needed
+        if not drop_done:
+            try:
+                circuit.send_drop()
+                drop_count += 1
+                output.debug(f"Sent DROP cell {drop_count}/{drop_target}")
+                if drop_interval > 0:
+                    time.sleep(drop_interval)
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                output.debug(f"Error sending DROP cell: {e}")
+                break
+
+        # Send VPADDING cell if needed
+        if not vpadding_done:
+            try:
+                connection.send_vpadding()
+                vpadding_count += 1
+                output.debug(f"Sent VPADDING cell {vpadding_count}/{vpadding_target}")
+                if vpadding_interval > 0:
+                    time.sleep(vpadding_interval)
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                output.debug(f"Error sending VPADDING cell: {e}")
+                break
+
+    output.debug(f"Padding loop finished: DROP={drop_count}, VPADDING={vpadding_count}")
 
 
 def verify_consensus_signatures(consensus: ConsensusDocument) -> tuple[int, int]:
@@ -787,6 +903,52 @@ def cmd_circuit(args: argparse.Namespace) -> int:
                     # CREATE_FAST doesn't use CircuitKeys, just print fingerprint
                     print(f"    [{i+1}] {hop.fingerprint[:16]}... (CREATE_FAST)")
 
+            # Handle padding if requested
+            drop_strategy = None
+            vpadding_strategy = None
+
+            if getattr(args, "with_drop", None):
+                try:
+                    drop_strategy = PaddingStrategy.parse(args.with_drop)
+                    print(f"\n  DROP padding: {drop_strategy.count} cells", end="")
+                    if drop_strategy.interval_ms > 0:
+                        print(f" ({drop_strategy.interval_ms}ms interval)")
+                    else:
+                        print()
+                except ValueError as e:
+                    print(f"\n  Invalid --with-drop: {e}", file=sys.stderr)
+                    circuit.destroy()
+                    return 1
+
+            if getattr(args, "with_vpadding", None):
+                try:
+                    vpadding_strategy = PaddingStrategy.parse(args.with_vpadding)
+                    print(f"  VPADDING padding: {vpadding_strategy.count} cells", end="")
+                    if vpadding_strategy.interval_ms > 0:
+                        print(f" ({vpadding_strategy.interval_ms}ms interval)")
+                    else:
+                        print()
+                except ValueError as e:
+                    print(f"\n  Invalid --with-vpadding: {e}", file=sys.stderr)
+                    circuit.destroy()
+                    return 1
+
+            if drop_strategy or vpadding_strategy:
+                print("\n  Sending padding cells...")
+                stop_event = threading.Event()
+                padding_thread = threading.Thread(
+                    target=_run_padding_loop,
+                    args=(circuit, conn, drop_strategy, vpadding_strategy, stop_event),
+                    daemon=True,
+                )
+                padding_thread.start()
+                padding_thread.join(timeout=30.0)  # Wait up to 30 seconds
+                stop_event.set()  # Signal to stop if still running
+                if padding_thread.is_alive():
+                    print("  Padding timeout, stopping...")
+                    padding_thread.join(timeout=1.0)
+                print("  Padding complete")
+
             # Clean up
             circuit.destroy()
             print("\n  Circuit destroyed")
@@ -1379,8 +1541,8 @@ def _open_stream_clearnet(args: argparse.Namespace, target_addr: str, target_por
 
         print(f"    Stream opened (stream_id={stream_id})")
 
-        # Send and receive data
-        return _send_and_receive(args, circuit, stream_id, target_addr)
+        # Send and receive data (pass connection for VPADDING support)
+        return _send_and_receive(args, circuit, stream_id, target_addr, connection=conn)
 
     except ConnectionError as e:
         print(f"  Connection error: {e}", file=sys.stderr)
@@ -1569,6 +1731,8 @@ def _open_stream_onion(args: argparse.Namespace, target_addr: str, target_port: 
             subcredential=subcredential,
             timeout=get_timeout(),
             verbose=output.is_verbose() or output.is_debug(),
+            pow_params=descriptor.pow_params,
+            blinded_key=blinded_key,
         )
 
         print(f"\nConnected! Opening stream to port {target_port}...", file=sys.stderr)
@@ -1581,10 +1745,12 @@ def _open_stream_onion(args: argparse.Namespace, target_addr: str, target_port: 
 
         print(f"Stream opened (id={stream_id})", file=sys.stderr)
 
-        # Send and receive data
-        exit_code = _send_and_receive(args, rend_result.circuit, stream_id, target_addr)
+        # Send and receive data (pass connection for VPADDING support)
+        # Note: _send_and_receive destroys the circuit
+        exit_code = _send_and_receive(
+            args, rend_result.circuit, stream_id, target_addr, connection=rend_result.connection
+        )
 
-        rend_result.circuit.destroy()
         rend_result.connection.close()
         return exit_code
 
@@ -1594,11 +1760,72 @@ def _open_stream_onion(args: argparse.Namespace, target_addr: str, target_port: 
 
 
 def _send_and_receive(
-    args: argparse.Namespace, circuit: Circuit, stream_id: int, target_addr: str
+    args: argparse.Namespace,
+    circuit: Circuit,
+    stream_id: int,
+    target_addr: str,
+    connection: RelayConnection | None = None,
 ) -> int:
-    """Send data and receive response on a stream."""
+    """Send data and receive response on a stream.
+
+    Args:
+        args: CLI arguments
+        circuit: The circuit to use
+        stream_id: Stream ID
+        target_addr: Target address
+        connection: Connection for VPADDING (if padding requested)
+    """
     http_get_path: str | None = getattr(args, "http_get", None)
     request_file: str | None = getattr(args, "file", None)
+
+    # Parse padding strategies
+    drop_strategy = None
+    vpadding_strategy = None
+    stop_event = None
+    padding_thread = None
+
+    if getattr(args, "with_drop", None):
+        try:
+            drop_strategy = PaddingStrategy.parse(args.with_drop)
+        except ValueError as e:
+            print(f"  Invalid --with-drop: {e}", file=sys.stderr)
+            circuit.destroy()
+            return 1
+
+    if getattr(args, "with_vpadding", None):
+        if connection is None:
+            print("  Error: VPADDING requires connection reference", file=sys.stderr)
+            circuit.destroy()
+            return 1
+        try:
+            vpadding_strategy = PaddingStrategy.parse(args.with_vpadding)
+        except ValueError as e:
+            print(f"  Invalid --with-vpadding: {e}", file=sys.stderr)
+            circuit.destroy()
+            return 1
+
+    # Start padding thread if needed
+    if drop_strategy or vpadding_strategy:
+        if drop_strategy:
+            print(f"  DROP padding: {drop_strategy.count} cells", end="")
+            if drop_strategy.interval_ms > 0:
+                print(f" ({drop_strategy.interval_ms}ms interval)")
+            else:
+                print()
+        if vpadding_strategy:
+            print(f"  VPADDING padding: {vpadding_strategy.count} cells", end="")
+            if vpadding_strategy.interval_ms > 0:
+                print(f" ({vpadding_strategy.interval_ms}ms interval)")
+            else:
+                print()
+
+        stop_event = threading.Event()
+        padding_thread = threading.Thread(
+            target=_run_padding_loop,
+            args=(circuit, connection, drop_strategy, vpadding_strategy, stop_event),
+            daemon=True,
+        )
+        padding_thread.start()
 
     if request_file or http_get_path:
         if http_get_path:
@@ -1668,6 +1895,14 @@ def _send_and_receive(
             print("  " + "-" * 50)
         else:
             print("  No response data received")
+
+    # Stop padding thread if running
+    if padding_thread is not None and stop_event is not None:
+        stop_event.set()
+        padding_thread.join(timeout=1.0)
+        if padding_thread.is_alive():
+            output.debug("Padding thread still running, continuing...")
+        print("  Padding complete")
 
     circuit.destroy()
     print("\n  Connection closed")
@@ -1817,6 +2052,16 @@ def main() -> int:
         metavar="'IP:PORT FP'",
         help="Bridge relay to use as first hop (format: 'IP:PORT FINGERPRINT')",
     )
+    circuit_parser.add_argument(
+        "--with-drop",
+        metavar="STRATEGY",
+        help="Send DROP cells (long-range padding). Format: count:N[,INTERVAL_MS]",
+    )
+    circuit_parser.add_argument(
+        "--with-vpadding",
+        metavar="STRATEGY",
+        help="Send VPADDING cells (link padding). Format: count:N[,INTERVAL_MS]",
+    )
 
     # open-stream command
     stream_parser = subparsers.add_parser(
@@ -1866,6 +2111,16 @@ def main() -> int:
         default=None,
         metavar="NUM",
         help="Absolute time period number (onion only, default: current)",
+    )
+    stream_parser.add_argument(
+        "--with-drop",
+        metavar="STRATEGY",
+        help="Send DROP cells (long-range padding). Format: count:N[,INTERVAL_MS]",
+    )
+    stream_parser.add_argument(
+        "--with-vpadding",
+        metavar="STRATEGY",
+        help="Send VPADDING cells (link padding). Format: count:N[,INTERVAL_MS]",
     )
 
     # resolve command

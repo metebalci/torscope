@@ -7,6 +7,7 @@ including TLS setup and the link handshake protocol.
 
 from __future__ import annotations
 
+import secrets
 import socket
 import ssl
 import struct
@@ -238,6 +239,37 @@ class RelayConnection:
         """Send a cell using the negotiated link protocol."""
         # Works with any cell type that has a pack() method
         self._send_raw(cell.pack(self.link_protocol))
+
+    def send_vpadding(self, length: int = 0) -> None:
+        """
+        Send a VPADDING cell (variable-length link padding).
+
+        VPADDING cells are used for link-level padding. They are processed
+        at the link layer and do not travel through circuits. Unlike fixed
+        PADDING cells (512/514 bytes), VPADDING can be any length.
+
+        Args:
+            length: Length of random padding (1-65535). If 0, generates
+                    random length between 1 and 509 bytes.
+
+        See: https://spec.torproject.org/tor-spec/link-protocol.html
+        """
+        if length == 0:
+            # Random length between 1 and 509 (typical relay cell payload size)
+            length = secrets.randbelow(509) + 1
+
+        if length > 65535:
+            raise ValueError("VPADDING length cannot exceed 65535")
+        if length < 1:
+            raise ValueError("VPADDING length must be at least 1")
+
+        # Generate random padding
+        padding = secrets.token_bytes(length)
+
+        # Create VPADDING cell (variable-length, circ_id=0)
+        vpadding_cell = Cell(circ_id=0, command=CellCommand.VPADDING, payload=padding)
+        self._send_raw(vpadding_cell.pack(self.link_protocol))
+        output.debug(f"Sent VPADDING cell ({length} bytes)")
 
     def recv_cell(self) -> Cell:
         """Receive a cell using the negotiated link protocol."""

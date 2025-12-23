@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from torscope.crypto import sha3_256, shake256
+from torscope.crypto.proof_of_work import PowParams
 from torscope.directory.models import ConsensusDocument, RouterStatusEntry
 from torscope.onion.circuit import Circuit
 from torscope.onion.connection import RelayConnection
@@ -204,6 +205,9 @@ class HSDescriptor:
     # Decryption status
     decrypted: bool = False
     decryption_error: str | None = None
+
+    # PoW parameters (from Proposal 327)
+    pow_params: PowParams | None = None
 
 
 def fetch_hs_descriptor(
@@ -389,7 +393,7 @@ def parse_hs_descriptor(
     # Try to decrypt if keys are provided
     if blinded_key is not None and subcredential is not None:
         try:
-            intro_points = decrypt_descriptor(
+            intro_points, pow_params = decrypt_descriptor(
                 outer.superencrypted_blob,
                 blinded_key,
                 subcredential,
@@ -401,6 +405,7 @@ def parse_hs_descriptor(
                 introduction_points=intro_points,
                 decrypted=True,
                 decryption_error=None,
+                pow_params=pow_params,
             )
         except Exception as e:  # pylint: disable=broad-exception-caught
             return HSDescriptor(
@@ -591,13 +596,16 @@ def _parse_first_layer(plaintext: bytes) -> tuple[bytes, str]:
     raise ValueError("No encrypted blob found in first layer")
 
 
-def _parse_introduction_points(plaintext: bytes) -> list[IntroductionPoint]:
-    """Parse introduction points from decrypted second layer.
+def _parse_second_layer(
+    plaintext: bytes,
+) -> tuple[list[IntroductionPoint], PowParams | None]:
+    """Parse introduction points and pow-params from decrypted second layer.
 
     Second layer format:
         create2-formats 2
         intro-auth-required ed25519
         single-onion-service  (optional)
+        pow-params v1 <seed-b64> <suggested-effort> <expiration>  (optional)
         introduction-point <link-specifiers-base64>
         onion-key ntor <base64>
         auth-key
@@ -614,19 +622,28 @@ def _parse_introduction_points(plaintext: bytes) -> list[IntroductionPoint]:
         plaintext: Decrypted second layer
 
     Returns:
-        List of IntroductionPoint objects
+        Tuple of (IntroductionPoint list, PowParams or None)
     """
     text = plaintext.decode("utf-8", errors="replace")
     lines = text.strip().split("\n")
 
     intro_points: list[IntroductionPoint] = []
     current_ip: IntroductionPoint | None = None
+    pow_params: PowParams | None = None
 
     i = 0
     while i < len(lines):
         line = lines[i].strip()
 
-        if line.startswith("introduction-point "):
+        if line.startswith("pow-params "):
+            # Parse PoW parameters (Proposal 327)
+            try:
+                pow_params = PowParams.parse(line)
+            except ValueError:
+                # Invalid pow-params, skip silently
+                pass
+
+        elif line.startswith("introduction-point "):
             # Start a new introduction point
             if current_ip is not None:
                 intro_points.append(current_ip)
@@ -680,7 +697,7 @@ def _parse_introduction_points(plaintext: bytes) -> list[IntroductionPoint]:
     if current_ip is not None:
         intro_points.append(current_ip)
 
-    return intro_points
+    return intro_points, pow_params
 
 
 def _parse_link_specifiers(data: bytes) -> list[tuple[int, bytes]]:
@@ -737,12 +754,12 @@ def decrypt_descriptor(
     revision_counter: int,
     descriptor_cookie: bytes | None = None,
     client_privkey: bytes | None = None,
-) -> list[IntroductionPoint]:
+) -> tuple[list[IntroductionPoint], PowParams | None]:
     """Decrypt a v3 hidden service descriptor and parse introduction points.
 
     This performs both layers of decryption:
     1. Outer layer (superencrypted) -> reveals auth data and inner blob
-    2. Inner layer (encrypted) -> reveals introduction points
+    2. Inner layer (encrypted) -> reveals introduction points and pow-params
 
     For private hidden services with client authorization, either provide
     descriptor_cookie directly, or provide client_privkey to derive it.
@@ -756,7 +773,7 @@ def decrypt_descriptor(
         client_privkey: Optional 32-byte X25519 private key for client auth
 
     Returns:
-        List of IntroductionPoint objects
+        Tuple of (IntroductionPoint list, PowParams or None)
 
     Raises:
         ValueError: If decryption or parsing fails
@@ -797,5 +814,5 @@ def decrypt_descriptor(
             raise ValueError("Client key not authorized for this service") from e
         raise
 
-    # Parse introduction points
-    return _parse_introduction_points(second_layer_plaintext)
+    # Parse second layer (introduction points and pow-params)
+    return _parse_second_layer(second_layer_plaintext)

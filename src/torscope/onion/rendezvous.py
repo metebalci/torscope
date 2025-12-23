@@ -21,6 +21,7 @@ import time
 from dataclasses import dataclass
 
 from torscope.cache import get_ed25519_from_cache
+from torscope.crypto.proof_of_work import PowParams, PowSolution, compute_pow
 from torscope.directory.hs_descriptor import IntroductionPoint
 from torscope.directory.models import ConsensusDocument, RouterStatusEntry
 from torscope.microdesc import get_ntor_key
@@ -255,6 +256,8 @@ def send_introduce(
     rendezvous_ntor_key: bytes,
     subcredential: bytes,
     verbose: bool = False,
+    pow_params: PowParams | None = None,
+    blinded_key: bytes | None = None,
 ) -> HsNtorClientState:
     """Send INTRODUCE1 cell to introduction point.
 
@@ -266,6 +269,8 @@ def send_introduce(
         rendezvous_ntor_key: Rendezvous point's ntor key
         subcredential: 32-byte subcredential
         verbose: Print debug info
+        pow_params: Optional PoW parameters from descriptor (Proposal 327)
+        blinded_key: 32-byte blinded public key (required if pow_params provided)
 
     Returns:
         HsNtorClientState for completing the handshake
@@ -327,11 +332,28 @@ def send_introduce(
     # Encrypt with hs-ntor keys
     ciphertext = hs_ntor.encrypt_introduce_data(encrypted_plaintext)
 
+    # Compute PoW if parameters are provided (Proposal 327)
+    pow_solution: PowSolution | None = None
+    if pow_params is not None:
+        if blinded_key is None:
+            raise RendezvousError("blinded_key required when pow_params provided")
+        _log(f"Computing PoW (effort={pow_params.suggested_effort})...")
+        pow_solution = compute_pow(
+            seed=pow_params.seed,
+            blinded_id=blinded_key,
+            effort=pow_params.suggested_effort,
+        )
+        if pow_solution is None:
+            _log("PoW computation failed, sending without PoW")
+        else:
+            _log("PoW computed successfully")
+
     # Build INTRODUCE1 cell without MAC
     cell_without_mac = build_introduce1_cell_without_mac(
         auth_key=intro_point.auth_key,
         client_pk=hs_ntor.client_pubkey,
         encrypted_data=ciphertext,
+        pow_solution=pow_solution,
     )
 
     # Compute MAC over the entire cell (per Tor's compute_introduce_mac)
@@ -464,6 +486,8 @@ def rendezvous_connect(
     subcredential: bytes,
     timeout: float = 30.0,
     verbose: bool = False,
+    pow_params: PowParams | None = None,
+    blinded_key: bytes | None = None,
 ) -> RendezvousResult:
     """Perform complete rendezvous protocol to connect to a hidden service.
 
@@ -474,6 +498,8 @@ def rendezvous_connect(
         subcredential: 32-byte subcredential
         timeout: Connection timeout
         verbose: Print debug info
+        pow_params: Optional PoW parameters from descriptor (Proposal 327)
+        blinded_key: 32-byte blinded public key (required if pow_params provided)
 
     Returns:
         RendezvousResult with circuit and connection
@@ -563,6 +589,8 @@ def rendezvous_connect(
                         rendezvous_ntor_key=rp_ntor_key,
                         subcredential=subcredential,
                         verbose=verbose,
+                        pow_params=pow_params,
+                        blinded_key=blinded_key,
                     )
                     _log("INTRODUCE1 accepted")
                     break  # Success!

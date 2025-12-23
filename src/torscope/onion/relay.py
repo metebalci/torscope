@@ -7,14 +7,20 @@ has an 11-byte header followed by data and padding.
 See: https://spec.torproject.org/tor-spec/relay-cells.html
 """
 
+from __future__ import annotations
+
 import hashlib
 import hmac
 import socket
 import struct
 from dataclasses import dataclass, field
 from enum import IntEnum
+from typing import TYPE_CHECKING
 
 from cryptography.hazmat.primitives.ciphers import Cipher, CipherContext, algorithms, modes
+
+if TYPE_CHECKING:
+    from torscope.crypto.proof_of_work import PowSolution
 
 # Relay cell format (tor-spec section 6.1)
 # https://spec.torproject.org/tor-spec/relay-cells.html
@@ -188,7 +194,7 @@ class RelayCell:
         return payload
 
     @classmethod
-    def unpack_payload(cls, payload: bytes) -> "RelayCell":
+    def unpack_payload(cls, payload: bytes) -> RelayCell:
         """
         Unpack relay cell from 509-byte payload (after decryption).
 
@@ -238,8 +244,8 @@ class RelayCrypto:
 
     # Running digest state objects (forward/backward)
     # These maintain incremental state across all cells
-    _digest_forward_state: "hashlib._Hash | None" = field(default=None, repr=False)
-    _digest_backward_state: "hashlib._Hash | None" = field(default=None, repr=False)
+    _digest_forward_state: hashlib._Hash | None = field(default=None, repr=False)
+    _digest_backward_state: hashlib._Hash | None = field(default=None, repr=False)
 
     @classmethod
     def create(
@@ -248,7 +254,7 @@ class RelayCrypto:
         key_backward: bytes,
         digest_forward: bytes,
         digest_backward: bytes,
-    ) -> "RelayCrypto":
+    ) -> RelayCrypto:
         """
         Create RelayCrypto with keys from ntor handshake (for regular hops).
 
@@ -300,7 +306,7 @@ class RelayCrypto:
         key_backward: bytes,
         digest_forward: bytes,
         digest_backward: bytes,
-    ) -> "RelayCrypto":
+    ) -> RelayCrypto:
         """
         Create RelayCrypto for hidden service hop (from hs-ntor handshake).
 
@@ -565,27 +571,27 @@ class LinkSpecifier:
         return struct.pack("BB", self.spec_type, len(self.data)) + self.data
 
     @classmethod
-    def from_ipv4(cls, ip: str, port: int) -> "LinkSpecifier":
+    def from_ipv4(cls, ip: str, port: int) -> LinkSpecifier:
         """Create IPv4 link specifier."""
         ip_bytes = bytes(int(x) for x in ip.split("."))
         data = ip_bytes + struct.pack(">H", port)
         return cls(spec_type=LinkSpecifierType.TLS_TCP_IPV4, data=data)
 
     @classmethod
-    def from_ipv6(cls, ip: str, port: int) -> "LinkSpecifier":
+    def from_ipv6(cls, ip: str, port: int) -> LinkSpecifier:
         """Create IPv6 link specifier."""
         ip_bytes = socket.inet_pton(socket.AF_INET6, ip)
         data = ip_bytes + struct.pack(">H", port)
         return cls(spec_type=LinkSpecifierType.TLS_TCP_IPV6, data=data)
 
     @classmethod
-    def from_legacy_id(cls, fingerprint: str) -> "LinkSpecifier":
+    def from_legacy_id(cls, fingerprint: str) -> LinkSpecifier:
         """Create legacy identity link specifier from hex fingerprint."""
         fp_bytes = bytes.fromhex(fingerprint.replace(" ", "").replace("$", ""))
         return cls(spec_type=LinkSpecifierType.LEGACY_ID, data=fp_bytes)
 
     @classmethod
-    def from_ed25519_id(cls, ed_key: bytes) -> "LinkSpecifier":
+    def from_ed25519_id(cls, ed_key: bytes) -> LinkSpecifier:
         """Create Ed25519 identity link specifier."""
         return cls(spec_type=LinkSpecifierType.ED25519_ID, data=ed_key)
 
@@ -770,10 +776,15 @@ def create_establish_rendezvous_payload(rendezvous_cookie: bytes) -> bytes:
     return rendezvous_cookie
 
 
+# Extension type for PoW (Proposal 327)
+EXT_FIELD_TYPE_POW = 0x02
+
+
 def build_introduce1_cell_without_mac(
     auth_key: bytes,
     client_pk: bytes,
     encrypted_data: bytes,
+    pow_solution: PowSolution | None = None,
 ) -> bytes:
     """Build INTRODUCE1 cell payload without the MAC.
 
@@ -784,7 +795,10 @@ def build_introduce1_cell_without_mac(
         AUTH_KEY_TYPE      [1 byte]   - 0x02 = Ed25519
         AUTH_KEY_LEN       [2 bytes]
         AUTH_KEY           [AUTH_KEY_LEN bytes]
-        N_EXTENSIONS       [1 byte]   - 0
+        N_EXTENSIONS       [1 byte]   - 0 or 1 (if PoW)
+        [EXT_FIELD_TYPE    [1 byte]   - 0x02 for PoW]
+        [EXT_FIELD_LEN     [1 byte]   - 69]
+        [EXT_FIELD         [69 bytes] - packed PowSolution]
         ENCRYPTED (partial, no MAC):
             CLIENT_PK      [32 bytes]
             ENCRYPTED_DATA [variable]
@@ -793,6 +807,7 @@ def build_introduce1_cell_without_mac(
         auth_key: 32-byte Ed25519 auth key from intro point
         client_pk: 32-byte X25519 ephemeral public key
         encrypted_data: Encrypted introduce data
+        pow_solution: Optional PoW solution (Proposal 327)
 
     Returns:
         INTRODUCE1 cell payload without MAC (caller must compute and append MAC)
@@ -816,8 +831,25 @@ def build_introduce1_cell_without_mac(
     # AUTH_KEY [32 bytes]
     payload.extend(auth_key)
 
-    # N_EXTENSIONS [1 byte] - no extensions
-    payload.append(0)
+    # N_EXTENSIONS and extensions
+    if pow_solution is not None:
+        # One extension: PoW
+        payload.append(1)  # N_EXTENSIONS
+
+        # EXT_FIELD_TYPE [1 byte]
+        payload.append(EXT_FIELD_TYPE_POW)
+
+        # Pack the PoW solution
+        pow_data = pow_solution.pack()
+
+        # EXT_FIELD_LEN [1 byte]
+        payload.append(len(pow_data))
+
+        # EXT_FIELD [69 bytes]
+        payload.extend(pow_data)
+    else:
+        # No extensions
+        payload.append(0)
 
     # ENCRYPTED section (without MAC)
     payload.extend(client_pk)  # CLIENT_PK [32 bytes]
@@ -959,7 +991,7 @@ class PaddingNegotiate:
         )
 
     @classmethod
-    def unpack(cls, payload: bytes) -> "PaddingNegotiate":
+    def unpack(cls, payload: bytes) -> PaddingNegotiate:
         """Unpack PADDING_NEGOTIATE payload."""
         if len(payload) < 8:
             raise ValueError(f"PADDING_NEGOTIATE payload too short: {len(payload)} < 8")
@@ -1007,7 +1039,7 @@ class PaddingNegotiated:
         )
 
     @classmethod
-    def unpack(cls, payload: bytes) -> "PaddingNegotiated":
+    def unpack(cls, payload: bytes) -> PaddingNegotiated:
         """Unpack PADDING_NEGOTIATED payload."""
         if len(payload) < 8:
             raise ValueError(f"PADDING_NEGOTIATED payload too short: {len(payload)} < 8")
@@ -1098,7 +1130,7 @@ class SendmeCell:
         raise ValueError(f"Unknown SENDME version: {self.version}")
 
     @classmethod
-    def unpack(cls, payload: bytes) -> "SendmeCell":
+    def unpack(cls, payload: bytes) -> SendmeCell:
         """Unpack SENDME payload."""
         if not payload:
             # Version 0: empty payload
