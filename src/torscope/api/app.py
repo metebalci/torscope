@@ -4,10 +4,12 @@ FastAPI application setup.
 
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 from torscope import __version__
 from torscope.api.geoip import get_geoip, init_geoip
@@ -16,6 +18,9 @@ from torscope.api.routes.directory import router as directory_router
 from torscope.api.routes.hidden_service import router as hidden_service_router
 from torscope.api.websocket.handlers import CircuitBuilder
 from torscope.api.websocket.manager import manager
+
+# Static files directory (look in current working directory)
+STATIC_DIR = Path.cwd() / "static"
 
 
 @asynccontextmanager
@@ -63,9 +68,27 @@ def create_app() -> FastAPI:
     app.include_router(circuit_router)
     app.include_router(hidden_service_router)
 
-    @app.get("/")
-    async def root() -> dict[str, str]:
-        """Root endpoint with API info."""
+    @app.get("/", response_model=None)
+    async def root() -> Response:
+        """Serve the circuit visualizer page."""
+        index_file = STATIC_DIR / "index.html"
+        if index_file.exists():
+            return FileResponse(
+                index_file,
+                headers={
+                    "Cache-Control": "no-cache, no-store, must-revalidate",
+                    "Pragma": "no-cache",
+                    "Expires": "0",
+                },
+            )
+        # Fallback: redirect to API docs if no static files
+        from fastapi.responses import RedirectResponse
+
+        return RedirectResponse(url="/docs")
+
+    @app.get("/api")
+    async def api_info() -> dict[str, str]:
+        """API info endpoint."""
         return {
             "name": "Torscope API",
             "version": __version__,

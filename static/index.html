@@ -1,0 +1,1036 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Torscope - Circuit Visualizer</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+
+        #container { display: flex; flex-direction: column; height: 100vh; }
+
+        #header {
+            padding: 15px 20px;
+            background: #1a1a2e;
+            color: white;
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        #header h1 { font-size: 1.2em; margin-right: 20px; }
+
+        #target-input {
+            width: 50%;
+            min-width: 300px;
+            max-width: 600px;
+            padding: 10px 15px;
+            font-size: 14px;
+            border: none;
+            border-radius: 5px;
+            background: #16213e;
+            color: white;
+        }
+
+        #target-input::placeholder { color: #666; }
+
+        button {
+            padding: 10px 20px;
+            font-size: 14px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        #connect-btn { background: #e94560; color: white; }
+        #connect-btn:hover { background: #ff6b6b; }
+        #connect-btn:disabled { background: #666; cursor: not-allowed; }
+
+        #directory-btn { background: #9b59b6; color: white; }
+        #directory-btn:hover { background: #a569bd; }
+        #directory-btn:disabled { background: #666; cursor: not-allowed; }
+
+        #routers-btn { background: #3498db; color: white; }
+        #routers-btn:hover { background: #5dade2; }
+        #routers-btn:disabled { background: #666; cursor: not-allowed; }
+
+        #map { flex: 1; }
+
+        .legend-box {
+            position: absolute;
+            bottom: 30px;
+            left: 10px;
+            background: rgba(26, 26, 46, 0.9);
+            color: white;
+            padding: 10px 15px;
+            border-radius: 8px;
+            z-index: 1000;
+            font-size: 12px;
+            display: none;
+        }
+
+        .legend-box.visible { display: block; }
+
+        #legend-directory { bottom: 170px; }
+        #legend-hsdirs { bottom: 30px; }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            margin: 5px 0;
+        }
+
+        .legend-color {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+
+        #sidebar {
+            position: absolute;
+            top: 80px;
+            right: 10px;
+            width: 320px;
+            max-height: calc(100vh - 100px);
+            background: rgba(26, 26, 46, 0.95);
+            color: white;
+            border-radius: 8px;
+            z-index: 1000;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        #sidebar h2 {
+            padding: 15px;
+            background: #16213e;
+            font-size: 14px;
+            border-bottom: 1px solid #333;
+        }
+
+        #events {
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px;
+            font-size: 12px;
+            font-family: monospace;
+            max-height: 300px;
+        }
+
+        .event {
+            padding: 8px;
+            margin-bottom: 5px;
+            background: #16213e;
+            border-radius: 4px;
+            border-left: 3px solid #e94560;
+        }
+
+        .event.success { border-left-color: #4ecca3; }
+        .event.info { border-left-color: #3498db; }
+        .event.error { border-left-color: #e74c3c; }
+
+        .event-type { color: #e94560; font-weight: bold; }
+        .event.success .event-type { color: #4ecca3; }
+        .event.info .event-type { color: #3498db; }
+
+        #hops {
+            padding: 10px;
+            border-top: 1px solid #333;
+        }
+
+        .hop {
+            display: flex;
+            align-items: center;
+            padding: 8px;
+            margin-bottom: 5px;
+            background: #16213e;
+            border-radius: 4px;
+        }
+
+        .hop-icon {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            background: #e94560;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            font-weight: bold;
+            margin-right: 10px;
+        }
+
+        .hop.client .hop-icon { background: #ffa500; }
+        .hop.guard .hop-icon { background: #00ff7f; }
+        .hop.middle .hop-icon { background: #00bfff; }
+        .hop.exit .hop-icon { background: #0000ff; }
+        .hop.target .hop-icon { background: #ff1493; }
+
+        .hop-info { flex: 1; }
+        .hop-nickname { font-weight: bold; }
+        .hop-location { font-size: 11px; color: #888; }
+
+        #status {
+            padding: 10px 15px;
+            background: #16213e;
+            font-size: 12px;
+            color: #888;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <div id="header">
+            <h1>Torscope</h1>
+            <input type="text" id="target-input" placeholder="Enter destination (e.g., example.com:80 or xyz...onion:80)" autocomplete="off" data-1p-ignore data-lpignore="true" />
+            <button id="connect-btn">Build Circuit</button>
+            <button id="directory-btn">Show Directory Servers</button>
+            <button id="routers-btn">Show Routers</button>
+        </div>
+        <div id="map"></div>
+        <div id="legend" class="legend-box">
+            <div class="legend-item"><div class="legend-color" style="background: #2ecc71;"></div> Guard</div>
+            <div class="legend-item"><div class="legend-color" style="background: #e74c3c;"></div> Exit</div>
+            <div class="legend-item"><div class="legend-color" style="background: #ffa500;"></div> Guard + Exit</div>
+            <div class="legend-item"><div class="legend-color" style="background: #888;"></div> Middle</div>
+        </div>
+        <div id="legend-directory" class="legend-box">
+            <div class="legend-item"><div class="legend-color" style="background: #e74c3c;"></div> Authority</div>
+            <div class="legend-item"><div class="legend-color" style="background: #ffa500;"></div> Fallback</div>
+            <div class="legend-item"><div class="legend-color" style="background: #2ecc71;"></div> Cache (V2Dir)</div>
+        </div>
+        <div id="legend-hsdirs" class="legend-box">
+            <div class="legend-item"><div class="legend-color" style="background: #9b59b6;"></div> Responsible HSDir</div>
+        </div>
+    </div>
+
+    <div id="sidebar">
+        <h2>Circuit Path</h2>
+        <div id="hops"></div>
+        <h2>Events</h2>
+        <div id="events"></div>
+        <div id="status">Ready</div>
+    </div>
+
+    <script>
+        // Initialize map
+        const map = L.map('map').setView([30, 0], 2);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; OpenStreetMap contributors'
+        }).addTo(map);
+
+        // State
+        let ws = null;
+        let markersLayer = L.layerGroup().addTo(map);
+        let routersLayer = L.layerGroup().addTo(map);
+        let directoryLayer = L.layerGroup().addTo(map);
+        let hsdirsLayer = L.layerGroup().addTo(map);
+        let polyline = null;
+        let allNodes = [];  // includes client, hops, and target
+        let selectedRouters = [];  // full router info from path.selected
+        let clientLocation = null;
+        let targetAddress = '';
+        let connectionTimeout = null;
+        let routersVisible = false;
+        let directoryVisible = false;
+
+        // DOM elements
+        const targetInput = document.getElementById('target-input');
+        const connectBtn = document.getElementById('connect-btn');
+        const routersBtn = document.getElementById('routers-btn');
+        const directoryBtn = document.getElementById('directory-btn');
+        const eventsDiv = document.getElementById('events');
+        const hopsDiv = document.getElementById('hops');
+        const statusDiv = document.getElementById('status');
+        const legend = document.getElementById('legend');
+        const legendDirectory = document.getElementById('legend-directory');
+        const legendHsdirs = document.getElementById('legend-hsdirs');
+
+        // Colors for different roles
+        const roleColors = {
+            'Client': '#ffa500',     // orange
+            'Guard': '#00ff7f',      // springgreen
+            'Middle': '#00bfff',     // deepskyblue
+            'Exit': '#0000ff',       // blue
+            'Target': '#ff1493'      // deeppink
+        };
+
+        // Fetch client location: get public IP externally, then use our GeoIP
+        async function fetchClientLocation() {
+            try {
+                // Get public IP from external service
+                const ipResponse = await fetch('https://api.ipify.org?format=json');
+                const ipData = await ipResponse.json();
+                const publicIp = ipData.ip;
+                console.log('Public IP:', publicIp);
+
+                // Look up location using our GeoIP database
+                const geoResponse = await fetch(`/api/v1/geoip/${publicIp}`);
+                const geoData = await geoResponse.json();
+                console.log('Client GeoIP:', geoData);
+
+                if (geoData.location) {
+                    clientLocation = {
+                        latitude: geoData.location.latitude,
+                        longitude: geoData.location.longitude,
+                        country_name: geoData.location.country_name,
+                        city: geoData.location.city,
+                        ip: publicIp
+                    };
+                    addEvent('client', `Your IP: ${publicIp} (${geoData.location.city || ''}, ${geoData.location.country_name || ''})`, 'info');
+                } else {
+                    clientLocation = { ip: publicIp };
+                    addEvent('client', `Your IP: ${publicIp} (location unknown)`, 'info');
+                }
+            } catch (e) {
+                console.error('Failed to fetch client location:', e);
+                addEvent('client', 'Could not determine location', 'info');
+            }
+        }
+
+        // Fetch target location using our API (DNS resolve + local GeoIP)
+        async function fetchTargetLocation(hostname) {
+            try {
+                const response = await fetch(`/api/v1/geoip-host/${hostname}`);
+                const data = await response.json();
+                console.log('Target location response:', data);
+
+                if (data.ip) {
+                    return {
+                        nickname: hostname,
+                        role: 'Target',
+                        ip: data.ip,
+                        location: data.location ? {
+                            latitude: data.location.latitude,
+                            longitude: data.location.longitude,
+                            country_name: data.location.country_name,
+                            city: data.location.city
+                        } : null
+                    };
+                }
+            } catch (e) {
+                console.error('Failed to fetch target location:', e);
+            }
+            return null;
+        }
+
+        function clearMap() {
+            // Clear circuit view
+            markersLayer.clearLayers();
+            hsdirsLayer.clearLayers();
+            if (polyline) {
+                map.removeLayer(polyline);
+                polyline = null;
+            }
+            allNodes = [];
+            selectedRouters = [];
+            hopsDiv.innerHTML = '';
+            legendHsdirs.classList.remove('visible');
+
+            // Hide other views
+            hideRouters();
+            hideDirectoryServers();
+        }
+
+        // Fetch and display responsible HSDirs for an onion address
+        async function showHSDirs(onionAddress) {
+            try {
+                const response = await fetch(`/api/v1/hsdirs/${onionAddress}`);
+                const data = await response.json();
+
+                if (data.success && data.data.hsdirs) {
+                    const hsdirs = data.data.hsdirs;
+                    addEvent('hsdirs', `Found ${hsdirs.length} responsible HSDirs`, 'info');
+
+                    hsdirs.forEach((hsdir, index) => {
+                        if (!hsdir.location || !hsdir.location.latitude) return;
+
+                        // Small offset for overlapping markers
+                        const offsetLat = (index % 3) * 0.5;
+                        const offsetLng = Math.floor(index / 3) * 0.5;
+                        const lat = hsdir.location.latitude + offsetLat;
+                        const lng = hsdir.location.longitude + offsetLng;
+
+                        const marker = L.circleMarker(
+                            [lat, lng],
+                            {
+                                radius: 7,
+                                fillColor: '#9b59b6',
+                                color: '#fff',
+                                weight: 2,
+                                fillOpacity: 0.9
+                            }
+                        ).addTo(hsdirsLayer);
+
+                        marker.bindPopup(`
+                            <b>${hsdir.nickname}</b><br>
+                            <em>HSDir ${index + 1}/6</em><br>
+                            ${hsdir.location.city || ''} ${hsdir.location.country_name || ''}<br>
+                            IP: ${hsdir.ip}:${hsdir.orport}
+                        `);
+                    });
+
+                    // Show HSDir legend
+                    legendHsdirs.classList.add('visible');
+                }
+            } catch (e) {
+                console.error('Failed to fetch HSDirs:', e);
+            }
+        }
+
+        function addEvent(type, message, className = 'info') {
+            const div = document.createElement('div');
+            div.className = `event ${className}`;
+            div.innerHTML = `<span class="event-type">${type}</span> ${message}`;
+            eventsDiv.insertBefore(div, eventsDiv.firstChild);
+
+            // Keep only last 50 events
+            while (eventsDiv.children.length > 50) {
+                eventsDiv.removeChild(eventsDiv.lastChild);
+            }
+        }
+
+        function addMarker(node, index) {
+            if (!node.location || !node.location.latitude || !node.location.longitude) {
+                return null;
+            }
+
+            const color = roleColors[node.role] || '#e94560';
+
+            // Different sizes for each role to distinguish overlapping nodes
+            const sizes = { 'Client': 14, 'Guard': 12, 'Middle': 10, 'Exit': 11, 'Target': 13 };
+            const radius = sizes[node.role] || 10;
+
+            // Small offset for overlapping nodes (based on index)
+            const offsetLat = (index % 3 - 1) * 0.5;
+            const offsetLng = (Math.floor(index / 3) % 3 - 1) * 0.5;
+            const lat = node.location.latitude + offsetLat;
+            const lng = node.location.longitude + offsetLng;
+
+            // Add shadow marker first (underneath)
+            L.circleMarker([lat, lng], {
+                radius: radius + 4,
+                fillColor: '#000',
+                color: '#000',
+                weight: 0,
+                fillOpacity: 0.3
+            }).addTo(markersLayer);
+
+            // Main marker with thicker border
+            const marker = L.circleMarker([lat, lng], {
+                radius: radius,
+                fillColor: color,
+                color: '#fff',
+                weight: 3,
+                fillOpacity: 1
+            }).addTo(markersLayer);
+
+            const label = node.role === 'Client' ? 'You' :
+                         node.role === 'Target' ? node.nickname :
+                         node.nickname;
+
+            // Build detailed popup content
+            let popupContent = `<b>${label}</b><br>Role: ${node.role}<br>`;
+
+            if (node.location) {
+                const loc = node.location;
+                popupContent += `${loc.city ? loc.city + ', ' : ''}${loc.country_name}<br>`;
+            }
+
+            if (node.ip) {
+                popupContent += `IP: ${node.ip}<br>`;
+            }
+
+            if (node.orport) {
+                popupContent += `OR Port: ${node.orport}<br>`;
+            }
+
+            if (node.fingerprint) {
+                popupContent += `Fingerprint: ${node.fingerprint.substring(0, 16)}...<br>`;
+            }
+
+            if (node.bandwidth) {
+                const bw = node.bandwidth >= 1000000
+                    ? (node.bandwidth / 1000000).toFixed(1) + ' MB/s'
+                    : (node.bandwidth / 1000).toFixed(0) + ' KB/s';
+                popupContent += `Bandwidth: ${bw}<br>`;
+            }
+
+            if (node.flags && node.flags.length > 0) {
+                popupContent += `Flags: ${node.flags.join(', ')}`;
+            }
+
+            marker.bindPopup(popupContent);
+
+            return marker;
+        }
+
+        function updateMap() {
+            // Clear existing markers and polyline
+            markersLayer.clearLayers();
+            if (polyline) {
+                map.removeLayer(polyline);
+                polyline = null;
+            }
+
+            // Add markers for all nodes and collect their positions
+            const markerPositions = [];
+            allNodes.forEach((node, index) => {
+                const marker = addMarker(node, index);
+                if (marker) {
+                    markerPositions.push(marker.getLatLng());
+                }
+            });
+
+            // Draw line connecting all nodes
+            if (markerPositions.length > 1) {
+                polyline = L.polyline(markerPositions, {
+                    color: '#e94560',
+                    weight: 3,
+                    dashArray: '10, 10'
+                }).addTo(map);
+            }
+
+            // Fit bounds to show all nodes with padding (account for right panel)
+            if (markerPositions.length > 0) {
+                const bounds = L.latLngBounds(markerPositions);
+                map.fitBounds(bounds, {
+                    maxZoom: 6,
+                    animate: true,
+                    duration: 0.5,
+                    paddingTopLeft: [50, 50],
+                    paddingBottomRight: [350, 50]  // Extra padding for right panel (320px + margin)
+                });
+            }
+        }
+
+        function renderHops() {
+            // Calculate hop numbers (skip client, count circuit hops only)
+            let hopNum = 0;
+            hopsDiv.innerHTML = allNodes.map((node, i) => {
+                const roleClass = node.role.toLowerCase();
+                let icon;
+                if (node.role === 'Client') {
+                    icon = '●';
+                } else if (node.role === 'Target') {
+                    icon = '◎';
+                } else {
+                    hopNum++;
+                    icon = hopNum.toString();
+                }
+                const displayName = node.role === 'Client' ? 'You' : node.nickname;
+                const hasLocation = node.location && node.location.latitude;
+                const locationText = hasLocation
+                    ? `${node.location.city ? node.location.city + ', ' : ''}${node.location.country_name}`
+                    : 'Location unknown';
+
+                return `
+                    <div class="hop ${roleClass}">
+                        <div class="hop-icon">${icon}</div>
+                        <div class="hop-info">
+                            <div class="hop-nickname">${displayName} (${node.role})</div>
+                            <div class="hop-location">${locationText}</div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function setStatus(text) {
+            statusDiv.textContent = text;
+        }
+
+        async function connect() {
+            const address = targetInput.value.trim();
+            if (!address) {
+                alert('Please enter an address');
+                return;
+            }
+
+            // Clear previous state
+            clearMap();
+            eventsDiv.innerHTML = '';
+
+            // Parse hostname from address
+            let hostname = address;
+            let port = 80;
+            if (address.includes(':')) {
+                const parts = address.split(':');
+                port = parseInt(parts[parts.length - 1]) || 80;
+                hostname = parts.slice(0, -1).join(':');
+            }
+            targetAddress = hostname;
+
+            // Always add client to nodes (even without location)
+            allNodes.push({
+                nickname: 'Your Computer',
+                role: 'Client',
+                ip: clientLocation?.ip || 'unknown',
+                location: clientLocation || null
+            });
+            updateMap();
+            renderHops();
+
+            // If .onion address, show responsible HSDirs
+            if (hostname.endsWith('.onion')) {
+                showHSDirs(hostname);
+            }
+
+            // Disable button and set timeout
+            connectBtn.disabled = true;
+            connectBtn.textContent = 'Building...';
+            setStatus('Connecting to WebSocket...');
+
+            // Set a timeout to reset button if stuck (90 seconds)
+            connectionTimeout = setTimeout(() => {
+                addEvent('timeout', 'Connection timed out', 'error');
+                setStatus('Timed out');
+                resetButton();
+                if (ws) {
+                    ws.close();
+                }
+            }, 90000);
+
+            // Connect to WebSocket
+            const wsUrl = `ws://${window.location.host}/api/v1/ws`;
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = () => {
+                setStatus('Connected, building circuit...');
+                addEvent('connected', 'WebSocket connected', 'success');
+
+                // Send build circuit command
+                ws.send(JSON.stringify({
+                    action: 'build_circuit',
+                    params: {
+                        hops: 3,
+                        port: port
+                    }
+                }));
+            };
+
+            ws.onmessage = async (event) => {
+                const data = JSON.parse(event.data);
+                await handleEvent(data);
+            };
+
+            ws.onerror = (error) => {
+                addEvent('error', 'WebSocket error', 'error');
+                setStatus('Error');
+                resetButton();
+            };
+
+            ws.onclose = () => {
+                addEvent('disconnected', 'WebSocket closed', 'info');
+                resetButton();
+            };
+        }
+
+        async function handleEvent(data) {
+            const { event, data: eventData } = data;
+
+            switch (event) {
+                case 'connected':
+                    addEvent(event, eventData.message, 'success');
+                    break;
+
+                case 'path.selecting':
+                    addEvent(event, `Selecting ${eventData.hops}-hop path`, 'info');
+                    setStatus('Selecting path...');
+                    break;
+
+                case 'path.selected':
+                    addEvent(event, `Path selected: ${eventData.routers.length} hops`, 'success');
+                    setStatus('Path selected, connecting...');
+                    // Store full router info for later use
+                    selectedRouters = eventData.routers;
+                    break;
+
+                case 'connection.connecting':
+                    addEvent(event, `Connecting to ${eventData.nickname}`, 'info');
+                    setStatus(`Connecting to ${eventData.nickname}...`);
+                    break;
+
+                case 'connection.tls_established':
+                    addEvent(event, `TLS established with ${eventData.nickname}`, 'success');
+                    break;
+
+                case 'connection.connected':
+                    addEvent(event, `Link protocol v${eventData.link_protocol}`, 'success');
+                    break;
+
+                case 'circuit.created':
+                    addEvent(event, `Circuit ID: ${eventData.circuit_id}`, 'info');
+                    break;
+
+                case 'hop.creating':
+                    addEvent(event, `Creating hop ${eventData.hop_number}: ${eventData.nickname} (${eventData.role})`, 'info');
+                    setStatus(`Extending to ${eventData.nickname}...`);
+                    break;
+
+                case 'hop.created':
+                    addEvent(event, `Hop ${eventData.hop_number} established: ${eventData.nickname}`, 'success');
+                    break;
+
+                case 'circuit.open':
+                    addEvent(event, `Circuit open with ${eventData.hops.length} hops`, 'success');
+                    setStatus('Circuit built! Resolving target...');
+
+                    console.log('circuit.open eventData:', eventData);
+                    console.log('selectedRouters:', selectedRouters);
+
+                    // Keep client at the start, add circuit hops
+                    const clientNode = allNodes.find(n => n.role === 'Client');
+                    allNodes = clientNode ? [clientNode] : [];
+
+                    // Add circuit hops using full router info from path.selected
+                    selectedRouters.forEach((router, idx) => {
+                        console.log(`Router ${idx}:`, router);
+                        allNodes.push(router);
+                    });
+
+                    // Try to get target location (only for clearnet)
+                    if (!targetAddress.endsWith('.onion')) {
+                        const targetNode = await fetchTargetLocation(targetAddress);
+                        if (targetNode) {
+                            allNodes.push(targetNode);
+                            const locText = targetNode.location
+                                ? `${targetNode.location.city || ''}, ${targetNode.location.country_name || ''}`
+                                : 'Location unknown';
+                            addEvent('target', `Target: ${targetAddress} (${locText})`, 'success');
+                        } else {
+                            // Add target without location
+                            allNodes.push({
+                                nickname: targetAddress,
+                                role: 'Target',
+                                location: null
+                            });
+                        }
+                    } else {
+                        // For onion addresses, just show without location
+                        allNodes.push({
+                            nickname: targetAddress.substring(0, 16) + '...',
+                            role: 'Target',
+                            location: null
+                        });
+                    }
+
+                    console.log('Final allNodes:', allNodes);
+                    updateMap();
+                    renderHops();
+                    setStatus('Circuit built successfully!');
+                    resetButton();
+                    break;
+
+                case 'circuit.closed':
+                    addEvent(event, 'Circuit closed', 'info');
+                    resetButton();
+                    break;
+
+                case 'circuit.retrying':
+                    addEvent(event, eventData.message, 'info');
+                    setStatus(`Retrying (${eventData.attempt + 1}/${eventData.max_retries})...`);
+                    break;
+
+                case 'circuit.failed':
+                    addEvent(event, eventData.error, 'error');
+                    setStatus('Circuit failed');
+                    resetButton();
+                    break;
+
+                case 'error':
+                    addEvent(event, eventData.message, 'error');
+                    setStatus('Error');
+                    resetButton();
+                    break;
+
+                default:
+                    addEvent(event, JSON.stringify(eventData), 'info');
+            }
+        }
+
+        function resetButton() {
+            connectBtn.disabled = false;
+            connectBtn.textContent = 'Build Circuit';
+            if (connectionTimeout) {
+                clearTimeout(connectionTimeout);
+                connectionTimeout = null;
+            }
+        }
+
+        // Helper to clear circuit view without affecting state variables
+        function clearCircuitView() {
+            markersLayer.clearLayers();
+            hsdirsLayer.clearLayers();
+            if (polyline) {
+                map.removeLayer(polyline);
+                polyline = null;
+            }
+            allNodes = [];
+            selectedRouters = [];
+            hopsDiv.innerHTML = '';
+            legendHsdirs.classList.remove('visible');
+        }
+
+        // Helper to hide directory servers
+        function hideDirectoryServers() {
+            if (directoryVisible) {
+                directoryLayer.clearLayers();
+                directoryBtn.textContent = 'Show Directory Servers';
+                legendDirectory.classList.remove('visible');
+                directoryVisible = false;
+            }
+        }
+
+        // Helper to hide routers
+        function hideRouters() {
+            if (routersVisible) {
+                routersLayer.clearLayers();
+                routersBtn.textContent = 'Show Routers';
+                legend.classList.remove('visible');
+                routersVisible = false;
+            }
+        }
+
+        async function toggleRouters() {
+            if (routersVisible) {
+                // Hide routers
+                routersLayer.clearLayers();
+                routersBtn.textContent = 'Show Routers';
+                legend.classList.remove('visible');
+                routersVisible = false;
+                return;
+            }
+
+            // Hide other views first
+            clearCircuitView();
+            hideDirectoryServers();
+
+            // Show routers
+            routersBtn.disabled = true;
+            routersBtn.textContent = 'Loading...';
+
+            try {
+                // Fetch all routers
+                const response = await fetch('/api/v1/routers');
+                const data = await response.json();
+
+                if (data.success && data.data.routers) {
+                    const routers = data.data.routers;
+                    let count = 0;
+
+                    routers.forEach(router => {
+                        if (!router.location || !router.location.latitude) return;
+
+                        // Color based on flags
+                        const isGuard = router.flags.includes('Guard');
+                        const isExit = router.flags.includes('Exit');
+                        let color = '#888';  // Default gray
+                        if (isGuard && isExit) {
+                            color = '#ffa500';  // Orange for Guard+Exit
+                        } else if (isExit) {
+                            color = '#e74c3c';  // Red for Exit
+                        } else if (isGuard) {
+                            color = '#2ecc71';  // Green for Guard
+                        }
+
+                        const marker = L.circleMarker(
+                            [router.location.latitude, router.location.longitude],
+                            {
+                                radius: 3,
+                                fillColor: color,
+                                color: color,
+                                weight: 1,
+                                fillOpacity: 0.7
+                            }
+                        ).addTo(routersLayer);
+
+                        // Simple popup
+                        marker.bindPopup(`
+                            <b>${router.nickname}</b><br>
+                            ${router.flags.join(', ')}<br>
+                            ${router.location.city || ''} ${router.location.country_name || ''}
+                        `);
+
+                        count++;
+                    });
+
+                    addEvent('routers', `Showing ${count} routers on map`, 'info');
+                    routersBtn.textContent = 'Hide Routers';
+                    legend.classList.add('visible');
+                    routersVisible = true;
+                }
+            } catch (e) {
+                console.error('Failed to fetch routers:', e);
+                addEvent('error', 'Failed to fetch routers', 'error');
+            }
+
+            routersBtn.disabled = false;
+        }
+
+        // Toggle directory servers display
+        async function toggleDirectory() {
+            if (directoryVisible) {
+                // Hide directory servers
+                directoryLayer.clearLayers();
+                directoryBtn.textContent = 'Show Directory Servers';
+                legendDirectory.classList.remove('visible');
+                directoryVisible = false;
+                return;
+            }
+
+            // Hide other views first
+            clearCircuitView();
+            hideRouters();
+
+            // Show directory servers
+            directoryBtn.disabled = true;
+            directoryBtn.textContent = 'Loading...';
+
+            try {
+                // Fetch authorities, fallbacks, and V2Dir caches in parallel
+                const [authResponse, fallbackResponse, hsdirResponse] = await Promise.all([
+                    fetch('/api/v1/authorities'),
+                    fetch('/api/v1/fallbacks'),
+                    fetch('/api/v1/routers?flags=V2Dir')
+                ]);
+
+                const authData = await authResponse.json();
+                const fallbackData = await fallbackResponse.json();
+                const hsdirData = await hsdirResponse.json();
+
+                let authCount = 0;
+                let fallbackCount = 0;
+                let cacheCount = 0;
+
+                // Add V2Dir caches first (green) - smallest, at the bottom
+                if (hsdirData.success && hsdirData.data.routers) {
+                    hsdirData.data.routers.forEach(cache => {
+                        if (!cache.location || !cache.location.latitude) return;
+
+                        const marker = L.circleMarker(
+                            [cache.location.latitude, cache.location.longitude],
+                            {
+                                radius: 3,
+                                fillColor: '#2ecc71',
+                                color: '#2ecc71',
+                                weight: 1,
+                                fillOpacity: 0.6
+                            }
+                        ).addTo(directoryLayer);
+
+                        marker.bindPopup(`
+                            <b>${cache.nickname}</b><br>
+                            <em>Directory Cache</em><br>
+                            ${cache.location.city || ''} ${cache.location.country_name || ''}<br>
+                            Flags: ${cache.flags.join(', ')}
+                        `);
+
+                        cacheCount++;
+                    });
+                }
+
+                // Add fallbacks next (orange) - so authorities appear on top
+                if (fallbackData.success && fallbackData.data.fallbacks) {
+                    fallbackData.data.fallbacks.forEach(fb => {
+                        if (!fb.location || !fb.location.latitude) return;
+
+                        const marker = L.circleMarker(
+                            [fb.location.latitude, fb.location.longitude],
+                            {
+                                radius: 4,
+                                fillColor: '#ffa500',
+                                color: '#ffa500',
+                                weight: 1,
+                                fillOpacity: 0.7
+                            }
+                        ).addTo(directoryLayer);
+
+                        marker.bindPopup(`
+                            <b>${fb.nickname || 'Fallback'}</b><br>
+                            <em>Fallback Directory</em><br>
+                            ${fb.location.city || ''} ${fb.location.country_name || ''}<br>
+                            IP: ${fb.ip}:${fb.orport}
+                        `);
+
+                        fallbackCount++;
+                    });
+                }
+
+                // Add authorities last (red) - so they appear on top
+                if (authData.success && authData.data.authorities) {
+                    // Track positions to offset overlapping authorities
+                    const seenPositions = {};
+
+                    authData.data.authorities.forEach(auth => {
+                        if (!auth.location || !auth.location.latitude) return;
+
+                        // Create position key and check for overlap
+                        const posKey = `${auth.location.latitude.toFixed(2)},${auth.location.longitude.toFixed(2)}`;
+                        const overlapIndex = seenPositions[posKey] || 0;
+                        seenPositions[posKey] = overlapIndex + 1;
+
+                        // Add offset for overlapping markers
+                        const offsetLat = (overlapIndex % 3) * 0.8;
+                        const offsetLng = Math.floor(overlapIndex / 3) * 0.8;
+                        const lat = auth.location.latitude + offsetLat;
+                        const lng = auth.location.longitude + offsetLng;
+
+                        const marker = L.circleMarker(
+                            [lat, lng],
+                            {
+                                radius: 8,
+                                fillColor: '#e74c3c',
+                                color: '#fff',
+                                weight: 3,
+                                fillOpacity: 1
+                            }
+                        ).addTo(directoryLayer);
+
+                        marker.bindPopup(`
+                            <b>${auth.nickname}</b><br>
+                            <em>Directory Authority</em><br>
+                            ${auth.location.city || ''} ${auth.location.country_name || ''}<br>
+                            IP: ${auth.ip}:${auth.dirport}
+                        `);
+
+                        authCount++;
+                    });
+                }
+
+                addEvent('directory', `Showing ${authCount} authorities, ${fallbackCount} fallbacks, ${cacheCount} caches`, 'info');
+                directoryBtn.textContent = 'Hide Directory Servers';
+                legendDirectory.classList.add('visible');
+                directoryVisible = true;
+
+            } catch (e) {
+                console.error('Failed to fetch directory servers:', e);
+                addEvent('error', 'Failed to fetch directory servers', 'error');
+            }
+
+            directoryBtn.disabled = false;
+        }
+
+        // Event listeners
+        connectBtn.addEventListener('click', connect);
+        routersBtn.addEventListener('click', toggleRouters);
+        directoryBtn.addEventListener('click', toggleDirectory);
+        targetInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') connect();
+        });
+
+        // Set default address
+        targetInput.value = 'torproject.org:80';
+
+        // Fetch client location on load
+        fetchClientLocation();
+    </script>
+</body>
+</html>

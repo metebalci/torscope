@@ -30,6 +30,85 @@ from torscope.onion.address import OnionAddress, get_current_time_period, get_ti
 router = APIRouter(prefix="/api/v1", tags=["hidden-service"])
 
 
+@router.get("/hsdirs/{address}")
+async def get_responsible_hsdirs(address: str) -> dict:
+    """
+    Get the responsible HSDirs for an onion address.
+
+    Returns the 6 HSDirs responsible for storing the descriptor.
+    """
+    try:
+        # Parse onion address
+        try:
+            onion = OnionAddress.parse(address)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid onion address: {e}") from e
+
+        # Get time period info
+        current_period = get_current_time_period()
+        period_info = get_time_period_info()
+
+        # Get consensus
+        consensus = get_consensus_cached()
+
+        # Compute blinded key
+        blinded_key = onion.compute_blinded_key(current_period)
+
+        # Get SRV from consensus
+        srv_current = None
+        if consensus.shared_rand_current:
+            srv_current = base64.b64decode(consensus.shared_rand_current[1])
+
+        if srv_current is None:
+            raise HTTPException(status_code=500, detail="No SRV in consensus")
+
+        # Fetch Ed25519 identities for HSDirs
+        ed25519_map = HSDirectoryRing.fetch_ed25519_map(consensus)
+
+        # Determine which SRV to use
+        hours_into_period = 24 - (period_info["remaining_minutes"] / 60)
+        use_previous_srv = hours_into_period >= 12
+
+        # Build HSDir ring
+        hsdir_ring = HSDirectoryRing(
+            consensus, current_period, use_second_srv=use_previous_srv, ed25519_map=ed25519_map
+        )
+
+        if hsdir_ring.size == 0:
+            raise HTTPException(status_code=500, detail="No HSDirs in ring")
+
+        # Find responsible HSDirs
+        hsdirs = hsdir_ring.get_responsible_hsdirs(blinded_key)
+
+        # Build HSDir info list with locations
+        hsdir_list = []
+        for h in hsdirs:
+            loc = _get_location(h.ip)
+            hsdir_list.append(
+                {
+                    "nickname": h.nickname,
+                    "fingerprint": h.fingerprint,
+                    "ip": h.ip,
+                    "orport": h.orport,
+                    "location": loc.model_dump() if loc else None,
+                }
+            )
+
+        return {
+            "success": True,
+            "data": {
+                "address": onion.address,
+                "hsdirs": hsdir_list,
+                "ring_size": hsdir_ring.size,
+            },
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
 def _get_location(ip: str) -> LocationInfo | None:
     """Get location info for an IP address."""
     geoip = get_geoip()

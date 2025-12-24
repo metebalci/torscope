@@ -14,6 +14,8 @@ It implements the Tor directory protocol and OR (Onion Router) protocol, allowin
 - Bridge support (direct, WebTunnel, obfs4)
 - Hidden service access with client authorization
 - DNS resolution through Tor
+- Web interface with real-time circuit visualization on a world map
+- REST API for programmatic access
 
 See [FEATURES.md](FEATURES.md) for detailed protocol support.
 
@@ -72,6 +74,31 @@ torscope open-stream example.com:80 --bridge "192.0.2.1:443 FINGERPRINT" --http-
 # Open stream through an obfs4 bridge
 torscope open-stream example.com:80 --bridge "obfs4 192.0.2.1:443 FINGERPRINT cert=... iat-mode=0" --http-get
 ```
+
+## Web Interface
+
+Start the web server to visualize circuits on a map:
+
+```bash
+# Start the API server
+torscope serve
+
+# Start on a specific port
+torscope serve --port 3000
+
+# Bind to localhost only
+torscope serve --host 127.0.0.1
+
+# With GeoIP database for router locations
+torscope serve --geoip-db /path/to/GeoLite2-City.mmdb
+```
+
+Then open http://localhost:8000 in your browser. The web interface allows you to:
+
+- Build circuits and visualize the path on a world map
+- View all Tor routers with color-coded markers (Guard, Exit, Middle)
+- View directory servers (Authorities, Fallbacks, Caches)
+- See responsible HSDirs when connecting to .onion addresses
 
 ## Verbosity Flags
 

@@ -6,7 +6,7 @@ Provides endpoints for authorities, fallbacks, routers, and consensus.
 
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from torscope.api.geoip import GeoIPLookup, get_geoip
 from torscope.api.models.directory import (
@@ -126,7 +126,9 @@ async def list_authorities() -> AuthoritiesResponse:
 
 @router.get("/fallbacks", response_model=FallbacksResponse)
 async def list_fallbacks(
-    limit: int = Query(default=100, ge=1, le=1000),
+    limit: int | None = Query(
+        default=None, ge=1, description="Max fallbacks to return (default: all)"
+    ),
     offset: int = Query(default=0, ge=0),
 ) -> FallbacksResponse:
     """List fallback directories."""
@@ -134,7 +136,12 @@ async def list_fallbacks(
     fallbacks = get_fallbacks()
 
     total = len(fallbacks)
-    fallbacks = fallbacks[offset : offset + limit]
+
+    # Apply pagination
+    if limit is not None:
+        fallbacks = fallbacks[offset : offset + limit]
+    elif offset > 0:
+        fallbacks = fallbacks[offset:]
 
     fb_list = []
     for fb in fallbacks:
@@ -161,7 +168,9 @@ async def list_fallbacks(
 @router.get("/routers", response_model=RoutersResponse)
 async def list_routers(
     flags: str | None = Query(default=None, description="Comma-separated flags filter"),
-    limit: int = Query(default=100, ge=1, le=1000),
+    limit: int | None = Query(
+        default=None, ge=1, description="Max routers to return (default: all)"
+    ),
     offset: int = Query(default=0, ge=0),
     sort_by: Literal["bandwidth", "nickname", "published"] | None = Query(default=None),
 ) -> RoutersResponse:
@@ -185,7 +194,12 @@ async def list_routers(
         routers = sorted(routers, key=lambda r: r.published, reverse=True)
 
     total = len(routers)
-    routers = routers[offset : offset + limit]
+
+    # Apply pagination only if limit is specified
+    if limit is not None:
+        routers = routers[offset : offset + limit]
+    elif offset > 0:
+        routers = routers[offset:]
 
     router_list = [_router_to_info(r, geoip) for r in routers]
 
@@ -354,3 +368,50 @@ async def refresh_consensus() -> dict[str, str]:
     clear_consensus_cache()
     get_consensus_cached()  # Re-fetch
     return {"status": "refreshed"}
+
+
+@router.get("/geoip/{ip}")
+async def lookup_geoip(ip: str) -> dict[str, LocationInfo | None]:
+    """Look up location for an IP address using local GeoIP database."""
+    geoip = get_geoip()
+    location = _get_location(ip, geoip)
+    return {"location": location}
+
+
+@router.get("/geoip-host/{hostname}")
+async def lookup_geoip_hostname(hostname: str) -> dict[str, str | LocationInfo | None]:
+    """Resolve hostname via DNS and look up location in GeoIP database."""
+    import socket
+
+    try:
+        ip = socket.gethostbyname(hostname)
+    except socket.gaierror:
+        return {"hostname": hostname, "ip": None, "location": None}
+
+    geoip = get_geoip()
+    location = _get_location(ip, geoip)
+
+    # Don't return useless 0,0 coordinates
+    if location is not None and location.latitude == 0.0 and location.longitude == 0.0:
+        location = None
+
+    return {"hostname": hostname, "ip": ip, "location": location}
+
+
+@router.get("/whoami")
+async def whoami(request: Request) -> dict[str, str | LocationInfo | None]:
+    """Get client's IP address and location."""
+    # Get client IP from request
+    client_ip = request.client.host if request.client else None
+
+    # Check for forwarded headers (reverse proxy)
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        client_ip = forwarded.split(",")[0].strip()
+
+    if not client_ip:
+        return {"ip": "unknown", "location": None}
+
+    geoip = get_geoip()
+    location = _get_location(client_ip, geoip)
+    return {"ip": client_ip, "location": location}

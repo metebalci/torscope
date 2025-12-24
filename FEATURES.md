@@ -78,9 +78,24 @@ Detailed protocol support for torscope.
 - SHAKE-256 key derivation
 - RSA and Ed25519 signature verification
 
-## Not Implemented
+### REST API
+- FastAPI-based HTTP server (`torscope serve`)
+- Directory endpoints: authorities, fallbacks, routers, consensus
+- Router details and extra-info descriptors
+- Hidden service HSDir lookup
+- GeoIP integration for router locations (MaxMind GeoLite2)
 
-- REST API
+### WebSocket API
+- Real-time circuit building events
+- Step-by-step visualization (path selection, connection, hop creation)
+- Automatic retry on connection failures
+
+### Web Interface
+- Circuit visualization on interactive world map (Leaflet.js)
+- Color-coded circuit nodes (Client, Guard, Middle, Exit, Target)
+- Router map with flag-based coloring (Guard, Exit, Guard+Exit, Middle)
+- Directory server map (Authorities, Fallbacks, V2Dir Caches)
+- HSDir visualization for .onion addresses
 
 ## Won't Implement
 
