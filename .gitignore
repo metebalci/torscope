@@ -54,3 +54,6 @@ CLAUDE.md
 
 # Cache directory
 .torscope/
+
+# Geodb
+GeoLite2-City.mmdb

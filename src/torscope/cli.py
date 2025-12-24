@@ -302,6 +302,44 @@ def cmd_version(args: argparse.Namespace) -> int:  # pylint: disable=unused-argu
     return 0
 
 
+def cmd_serve(args: argparse.Namespace) -> int:
+    """Start the API server."""
+    try:
+        import uvicorn
+    except ImportError:
+        print("Error: API dependencies not installed.", file=sys.stderr)
+        print("Install with: pip install torscope[api]", file=sys.stderr)
+        return 1
+
+    host = args.host
+    port = args.port
+    reload = args.reload
+    geoip_db = getattr(args, "geoip_db", None)
+
+    # Initialize GeoIP if path provided
+    if geoip_db:
+        from torscope.api.geoip import init_geoip
+
+        geoip = init_geoip(geoip_db)
+        if geoip.available:
+            print(f"GeoIP database: {geoip_db}")
+        else:
+            print(f"Warning: GeoIP database not found at {geoip_db}", file=sys.stderr)
+
+    print(f"Starting Torscope API server on http://{host}:{port}")
+    print(f"API docs: http://{host}:{port}/docs")
+    print("Press Ctrl+C to stop")
+    print()
+
+    uvicorn.run(
+        "torscope.api.app:app",
+        host=host,
+        port=port,
+        reload=reload,
+    )
+    return 0
+
+
 def cmd_clear(args: argparse.Namespace) -> int:  # pylint: disable=unused-argument
     """Clear the cached consensus."""
     clear_cache()
@@ -1953,6 +1991,32 @@ def main() -> int:
     # version command
     subparsers.add_parser("version", help="Display the torscope version")
 
+    # serve command (API server)
+    serve_parser = subparsers.add_parser("serve", help="Start the API server")
+    serve_parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        metavar="HOST",
+        help="Host to bind to (default: 127.0.0.1)",
+    )
+    serve_parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        metavar="PORT",
+        help="Port to bind to (default: 8000)",
+    )
+    serve_parser.add_argument(
+        "--reload",
+        action="store_true",
+        help="Enable auto-reload for development",
+    )
+    serve_parser.add_argument(
+        "--geoip-db",
+        metavar="PATH",
+        help="Path to GeoLite2-City.mmdb (default: ./GeoLite2-City.mmdb)",
+    )
+
     # clear command
     subparsers.add_parser("clear", help="Clear cache")
 
@@ -2147,6 +2211,7 @@ def main() -> int:
     # Dispatch to command handler
     commands: dict[str, Callable[[argparse.Namespace], int]] = {
         "version": cmd_version,
+        "serve": cmd_serve,
         "clear": cmd_clear,
         "authorities": cmd_authorities,
         "fallbacks": cmd_fallbacks,
