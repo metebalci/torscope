@@ -713,13 +713,17 @@ class Circuit:
                 f"{stream.deliver_window + STREAM_WINDOW_INCREMENT})"
             )
 
-    def begin_stream(self, address: str, port: int) -> int | None:
+    def begin_stream(self, address: str, port: int, flags: int = 0) -> int | None:
         """
         Open a stream to a remote address.
 
         Args:
             address: Hostname or IP address
             port: Port number
+            flags: Optional BEGIN flags (see BEGIN_FLAG_* constants)
+                   - BEGIN_FLAG_IPV6_OK (0x01): We support IPv6 addresses
+                   - BEGIN_FLAG_IPV4_NOT_OK (0x02): We don't want IPv4 addresses
+                   - BEGIN_FLAG_IPV6_PREFERRED (0x04): Prefer IPv6 over IPv4
 
         Returns:
             Stream ID if successful, None if failed
@@ -728,12 +732,13 @@ class Circuit:
         output.debug(f"Allocated stream ID: {stream_id}")
 
         # Send RELAY_BEGIN
-        output.verbose(f"RELAY_BEGIN → {address}:{port} (stream {stream_id})")
+        flags_str = f" flags=0x{flags:02x}" if flags else ""
+        output.verbose(f"RELAY_BEGIN → {address}:{port} (stream {stream_id}){flags_str}")
         output.debug(f"Sending through {len(self._crypto_layers)} crypto layers")
         begin_cell = RelayCell(
             relay_command=RelayCommand.BEGIN,
             stream_id=stream_id,
-            data=create_begin_payload(address, port),
+            data=create_begin_payload(address, port, flags),
         )
         # Debug: show the plaintext before encryption
         packed = begin_cell.pack_payload()

@@ -45,6 +45,11 @@ from torscope.microdesc import get_ntor_key
 from torscope.onion.address import OnionAddress, get_current_time_period, get_time_period_info
 from torscope.onion.circuit import Circuit
 from torscope.onion.connection import RelayConnection
+from torscope.onion.relay import (
+    BEGIN_FLAG_IPV4_NOT_OK,
+    BEGIN_FLAG_IPV6_OK,
+    BEGIN_FLAG_IPV6_PREFERRED,
+)
 from torscope.onion.rendezvous import RendezvousError, rendezvous_connect
 from torscope.path import PathSelector
 
@@ -111,6 +116,26 @@ class PaddingStrategy:
                 raise ValueError(f"Invalid count or interval: {params}") from e
             return cls(strategy="count", count=count, interval_ms=interval_ms)
         raise ValueError(f"Invalid count format: {params} (expected N or N,INTERVAL)")
+
+
+def get_begin_flags(args: argparse.Namespace) -> int:
+    """
+    Compute BEGIN flags from CLI arguments.
+
+    Args:
+        args: Parsed CLI arguments with --ipv6-ok, --ipv4-not-ok, --ipv6-preferred
+
+    Returns:
+        32-bit flags value for RELAY_BEGIN cell
+    """
+    flags = 0
+    if getattr(args, "ipv6_ok", False):
+        flags |= BEGIN_FLAG_IPV6_OK
+    if getattr(args, "ipv4_not_ok", False):
+        flags |= BEGIN_FLAG_IPV4_NOT_OK
+    if getattr(args, "ipv6_preferred", False):
+        flags |= BEGIN_FLAG_IPV6_PREFERRED
+    return flags
 
 
 def _run_padding_loop(
@@ -1484,9 +1509,11 @@ def _open_stream_clearnet(args: argparse.Namespace, target_addr: str, target_por
 
         print(f"\n  Circuit built with {len(circuit.hops)} hops!")
 
-        # Open stream
-        print(f"\n  Opening stream to {target_addr}:{target_port}...")
-        stream_id = circuit.begin_stream(target_addr, target_port)
+        # Open stream with BEGIN flags
+        begin_flags = get_begin_flags(args)
+        flags_str = f" (flags=0x{begin_flags:02x})" if begin_flags else ""
+        print(f"\n  Opening stream to {target_addr}:{target_port}{flags_str}...")
+        stream_id = circuit.begin_stream(target_addr, target_port, flags=begin_flags)
 
         if stream_id is None:
             print("    Stream rejected by exit router", file=sys.stderr)
@@ -1689,8 +1716,11 @@ def _open_stream_onion(args: argparse.Namespace, target_addr: str, target_port: 
             blinded_key=blinded_key,
         )
 
-        print(f"\nConnected! Opening stream to port {target_port}...", file=sys.stderr)
-        stream_id = rend_result.circuit.begin_stream(target_addr, target_port)
+        # Open stream with BEGIN flags
+        begin_flags = get_begin_flags(args)
+        flags_str = f" (flags=0x{begin_flags:02x})" if begin_flags else ""
+        print(f"\nConnected! Opening stream to port {target_port}{flags_str}...", file=sys.stderr)
+        stream_id = rend_result.circuit.begin_stream(target_addr, target_port, flags=begin_flags)
         if stream_id is None:
             print("Failed to open stream", file=sys.stderr)
             rend_result.circuit.destroy()
@@ -2065,6 +2095,22 @@ def main() -> int:
         "--with-vpadding",
         metavar="STRATEGY",
         help="Send VPADDING cells (link padding). Format: count:N[,INTERVAL_MS]",
+    )
+    # BEGIN flags for IPv6 preferences (tor-spec section 6.2)
+    stream_parser.add_argument(
+        "--ipv6-ok",
+        action="store_true",
+        help="Allow exit to resolve/connect to IPv6 addresses",
+    )
+    stream_parser.add_argument(
+        "--ipv4-not-ok",
+        action="store_true",
+        help="Don't allow exit to resolve/connect to IPv4 addresses",
+    )
+    stream_parser.add_argument(
+        "--ipv6-preferred",
+        action="store_true",
+        help="Prefer IPv6 over IPv4 when both are available",
     )
 
     # resolve command

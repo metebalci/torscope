@@ -29,9 +29,10 @@ It implements the Tor directory protocol and OR (Onion Router) protocol, allowin
 ### OR Protocol - Circuit Layer
 - Circuit creation with CREATE2/CREATED2 (ntor handshake)
 - One-hop circuits with CREATE_FAST/CREATED_FAST
-- Circuit extension with RELAY_EXTEND2/EXTENDED2
+- Circuit extension with RELAY_EXTEND2/EXTENDED2 via RELAY_EARLY
 - Multi-hop circuits (1-3 hops)
 - Layered encryption/decryption (AES-128-CTR)
+- Circuit teardown (DESTROY) with reason codes
 - Circuit padding negotiation (PADDING_NEGOTIATE/PADDING_NEGOTIATED)
 - DROP cells (long-range dummy traffic)
 
@@ -42,8 +43,9 @@ It implements the Tor directory protocol and OR (Onion Router) protocol, allowin
 
 ### OR Protocol - Streams
 - Stream creation (RELAY_BEGIN/CONNECTED)
+- BEGIN flags for IPv6 preferences (ipv6-ok, ipv4-not-ok, ipv6-preferred)
 - Data transfer (RELAY_DATA)
-- Stream termination (RELAY_END)
+- Stream termination (RELAY_END) with reason codes
 - DNS resolution (RELAY_RESOLVE/RESOLVED)
 - Directory streams (RELAY_BEGIN_DIR)
 - Flow control (SENDME cells) with authenticated SENDME v1
@@ -127,6 +129,9 @@ torscope resolve example.com
 
 # Connect to a website through Tor
 torscope open-stream example.com:80 --http-get
+
+# Connect with IPv6 preferences
+torscope open-stream example.com:80 --http-get --ipv6-ok --ipv6-preferred
 
 # Access a hidden service
 torscope hidden-service duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion

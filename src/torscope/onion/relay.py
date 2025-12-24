@@ -60,6 +60,16 @@ STREAM_SENDME_THRESHOLD = 450  # Send SENDME when window drops to this
 SENDME_VERSION_0 = 0  # Legacy: empty payload
 SENDME_VERSION_1 = 1  # Authenticated: includes digest
 
+# =============================================================================
+# BEGIN Flags (tor-spec section 6.2)
+# See: https://spec.torproject.org/tor-spec/opening-streams.html
+# =============================================================================
+# These flags control IPv4/IPv6 address preferences for stream connections.
+# The FLAGS field is a 32-bit value; only bits 1-3 are currently defined.
+BEGIN_FLAG_IPV6_OK = 0x01  # Bit 1: We support IPv6 addresses
+BEGIN_FLAG_IPV4_NOT_OK = 0x02  # Bit 2: We don't want IPv4 addresses
+BEGIN_FLAG_IPV6_PREFERRED = 0x04  # Bit 3: Prefer IPv6 over IPv4
+
 # Relay header: Command(1) + Recognized(2) + StreamID(2) + Digest(4) + Length(2)
 RELAY_HEADER_LEN = 11
 

@@ -22,6 +22,9 @@ from torscope.onion.circuit import Circuit, CircuitHop, CircuitState
 from torscope.onion.connection import RelayConnection
 from torscope.onion.ntor import CircuitKeys, NtorClientState, node_id_from_fingerprint
 from torscope.onion.relay import (
+    BEGIN_FLAG_IPV4_NOT_OK,
+    BEGIN_FLAG_IPV6_OK,
+    BEGIN_FLAG_IPV6_PREFERRED,
     LinkSpecifier,
     LinkSpecifierType,
     RelayCell,
@@ -75,6 +78,9 @@ __all__ = [
     "LinkSpecifierType",
     "ResolvedAnswer",
     "ResolvedType",
+    "BEGIN_FLAG_IPV6_OK",
+    "BEGIN_FLAG_IPV4_NOT_OK",
+    "BEGIN_FLAG_IPV6_PREFERRED",
     "create_begin_payload",
     "create_end_payload",
     "create_extend2_payload",
