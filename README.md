@@ -1,3 +1,5 @@
+> **Note:** This project was written by [Claude](https://claude.ai), an AI assistant by Anthropic, under human guidance using [Claude Code](https://claude.ai/code).
+
 # Overview
 
 torscope is a tool for exploring the [Tor network](https://en.wikipedia.org/wiki/Tor_(network)).
